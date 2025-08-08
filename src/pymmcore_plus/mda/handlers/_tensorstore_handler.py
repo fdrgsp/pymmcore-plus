@@ -19,8 +19,9 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from typing import Literal, TypeAlias
 
-    import tensorstore as ts
     import useq
+
+    # Import tensorstore types are not directly accessible at runtime
     from typing_extensions import Self  # py311
 
     from pymmcore_plus.metadata import FrameMetaV1, SummaryMetaV1
@@ -35,15 +36,10 @@ FRAME_DIM = "frame"
 class TensorStoreHandler:
     """Tensorstore handler for writing MDA sequences.
 
-    This is a performant and shape-agnostic handler for writing MDA sequences to
-    chunked storages like zarr, n5, backed by tensorstore:
-    <https://google.github.io/tensorstore/>
-
-    By default, the handler will store frames in a zarr array, with a shape of
-    (nframes, *frame_shape) and a chunk size of (1, *frame_shape), i.e. each frame
-    is stored in a separate chunk. To customize shape or chunking, override the
-    `get_full_shape`, `get_chunk_layout`, and `get_index_domain` methods (these
-    may change in the future as we learn to use tensorstore better).
+    This handler writes frames to a tensorstore-backed array (zarr by default).
+    It can optionally emit minimal OME-Zarr metadata (NGFF 0.4) so the result is
+    consumable by OME-aware tools. By default, frames are written as chunks of a
+    single XY plane.
 
     Parameters
     ----------
@@ -65,6 +61,13 @@ class TensorStoreHandler:
         in this object will override the default values provided by the handler.
         This is a complex object that can completely define the tensorstore, see
         <https://google.github.io/tensorstore/spec.html> for more information.
+    ome_zarr : bool, optional
+        Whether to emit OME-Zarr (NGFF 0.4) metadata, by default False. When enabled,
+        writes .zgroup, .zattrs with multiscales metadata and array-level attributes
+        compatible with OME-aware tools.
+    array_path : str | None, optional
+        Path within the zarr group for the array data when ome_zarr=True. If None,
+        defaults to "image" when OME-Zarr mode is enabled.
 
     Examples
     --------
@@ -84,7 +87,15 @@ class TensorStoreHandler:
         axis_order="tpcz",
     )
 
+    # Basic tensorstore usage
     writer = TensorStoreHandler(path="example_ts.zarr", delete_existing=True)
+
+    # OME-Zarr compatible output
+    writer = TensorStoreHandler(
+        path="data.zarr",
+        ome_zarr=True,
+        array_path="data/image"
+    )
     core.mda.run(sequence, output=writer)
     ```
 
@@ -98,6 +109,8 @@ class TensorStoreHandler:
         path: str | PathLike | None = None,
         delete_existing: bool = False,
         spec: Mapping | None = None,
+        ome_zarr: bool = False,
+        array_path: str | None = None,
     ) -> None:
         try:
             import tensorstore
@@ -110,6 +123,8 @@ class TensorStoreHandler:
         self.kvstore = f"file://{path}" if path is not None else kvstore
         self.delete_existing = delete_existing
         self.spec = spec
+        self._emit_ome_zarr = bool(ome_zarr)
+        self._array_path = array_path
 
         self._current_sequence: useq.MDASequence | None = None
 
@@ -119,9 +134,9 @@ class TensorStoreHandler:
 
         self._size_increment = 300
 
-        self._store: ts.TensorStore | None = None
-        self._futures: list[ts.Future | ts.WriteFutures] = []
-        self._frame_indices: dict[EventKey, int | ts.DimExpression] = {}
+        self._store: Any | None = None
+        self._futures: list[Any] = []
+        self._frame_indices: dict[EventKey, int] = {}
 
         # "_nd_storage" means we're greedily attempting to store the data in a
         # multi-dimensional format based on the axes of the sequence.
@@ -133,10 +148,12 @@ class TensorStoreHandler:
 
         # the highest index seen for each axis
         self._axis_max: dict[str, int] = {}
+        self._labels: tuple[str, ...] | None = None
+        self._timestamps: list[float] = []
 
     @property
-    def store(self) -> ts.TensorStore | None:
-        """The current tensorstore."""
+    def store(self) -> Any | None:
+        """The tensorstore store."""
         return self._store
 
     @classmethod
@@ -219,18 +236,19 @@ class TensorStoreHandler:
         if self._store is None:
             self._store = self.new_store(frame, event.sequence, meta).result()
 
-        ts_index: ts.DimExpression | int
+        ts_index: Any | int
         if self._nd_storage:
             ts_index = self._event_index_to_store_index(event.index)
         else:
-            if self._frame_index >= self._store.shape[0]:
+            if self._store is not None and self._frame_index >= self._store.shape[0]:
                 self._store = self._expand_store(self._store).result()
             ts_index = self._frame_index
             # store reverse lookup of event.index -> frame_index
             self._frame_indices[frozenset(event.index.items())] = ts_index
 
         # write the new frame asynchronously
-        self._futures.append(self._store[ts_index].write(frame))
+        if self._store is not None:
+            self._futures.append(self._store[ts_index].write(frame))
 
         # store, but do not process yet, the frame metadata
         self.frame_metadatas.append((event, meta))
@@ -256,7 +274,7 @@ class TensorStoreHandler:
 
     def new_store(
         self, frame: np.ndarray, seq: useq.MDASequence | None, meta: FrameMetaV1
-    ) -> ts.Future[ts.TensorStore]:
+    ) -> Any:
         shape, chunks, labels = self.get_shape_chunks_labels(frame.shape, seq)
         self._nd_storage = FRAME_DIM not in labels
         return self._ts.open(
@@ -323,12 +341,16 @@ class TensorStoreHandler:
             store.kvstore.write(
                 ".zattrs", json_dumps(metadata).decode("utf-8")
             ).result()
+
+            # Write OME-Zarr metadata if requested
+            if self._emit_ome_zarr:
+                self._write_ome_zarr_metadata(store)
         elif self.ts_driver == "n5":  # pragma: no cover
             attrs = json_loads(store.kvstore.read("attributes.json").result().value)
             attrs.update(metadata)
             store.kvstore.write("attributes.json", json_dumps(attrs).decode("utf-8"))
 
-    def _expand_store(self, store: ts.TensorStore) -> ts.Future[ts.TensorStore]:
+    def _expand_store(self, store: Any) -> Any:
         """Grow the store by `self._size_increment` frames.
 
         This is used when _nd_storage mode is False and we've run out of space.
@@ -338,7 +360,7 @@ class TensorStoreHandler:
 
     def _event_index_to_store_index(
         self, index: Mapping[str, int | slice]
-    ) -> ts.DimExpression:
+    ) -> Any:
         """Convert event index to store index.
 
         The return value is safe to use as an index to self._store[...]
@@ -348,7 +370,7 @@ class TensorStoreHandler:
             return self._ts.d[keys][values]
 
         if any(isinstance(v, slice) for v in index.values()):
-            idx: list | int | ts.DimExpression = self._get_frame_indices(index)
+            idx: list | int | Any = self._get_frame_indices(index)
         else:
             try:
                 idx = self._frame_indices[frozenset(index.items())]  # type: ignore
@@ -376,6 +398,155 @@ class TensorStoreHandler:
                     f"Index {dict(key)} not found in frame_indices.", stacklevel=2
                 )
         return indices
+
+    def _write_ome_zarr_metadata(self, store: Any) -> None:
+        """Write OME-Zarr metadata to the zarr store."""
+        if not self._current_sequence:
+            return
+
+        kvstore = store.kvstore
+
+        # Write .zgroup file
+        zgroup_content = {"zarr_format": 2}
+        kvstore.write(".zgroup", json_dumps(zgroup_content).decode("utf-8")).result()
+
+        # Calculate the pixel sizes for multiscales metadata
+        summary_meta: dict[str, Any] = {}
+        if self.frame_metadatas:
+            frame_meta = self.frame_metadatas[0][1]
+            summary_meta = dict(frame_meta) if hasattr(frame_meta, 'items') else {}
+
+        pixel_size_x = summary_meta.get("pixel_size_x", 1.0)
+        pixel_size_y = summary_meta.get("pixel_size_y", 1.0)
+        pixel_size_z = 1.0  # Default z pixel size
+
+        # Get the array shape and determine coordinate transformations
+        if store.shape is not None:
+            shape = store.shape
+        else:
+            # Fallback shape calculation
+            shape = self._get_final_shape()
+
+        # Create scale transformations
+        scale = []
+        if len(shape) >= 3:  # Has at least Z, Y, X dimensions
+            scale = [pixel_size_z, pixel_size_y, pixel_size_x]
+            if len(shape) > 3:  # Has additional dimensions
+                scale = [1.0] * (len(shape) - 3) + scale
+
+        # Create multiscales metadata
+        array_path = self._array_path or "0"
+        multiscales = [
+            {
+                "version": "0.4",
+                "axes": self._get_ome_axes(shape),
+                "datasets": [
+                    {
+                        "path": array_path,
+                        "coordinateTransformations": [
+                            {"type": "scale", "scale": scale}
+                        ]
+                    }
+                ]
+            }
+        ]
+
+        # Create .zattrs content with multiscales
+        zattrs_content = {"multiscales": multiscales}
+        kvstore.write(".zattrs", json_dumps(zattrs_content).decode("utf-8")).result()
+
+        # Write individual array .zattrs if needed
+        if array_path != ".":
+            array_zattrs = {}
+            kvstore.write(f"{array_path}/.zattrs", json_dumps(array_zattrs).decode("utf-8")).result()
+
+    def _get_ome_axes(self, shape: tuple[int, ...]) -> list[dict[str, str]]:
+        """Get OME-NGFF axes specification based on array shape."""
+        axes = []
+
+        # Map dimensions based on labels or sequence structure
+        if self._labels:
+            for label in self._labels:
+                if label == "t":
+                    axes.append({"name": "t", "type": "time"})
+                elif label == "c":
+                    axes.append({"name": "c", "type": "channel"})
+                elif label == "z":
+                    axes.append({"name": "z", "type": "space"})
+                elif label == "y":
+                    axes.append({"name": "y", "type": "space"})
+                elif label == "x":
+                    axes.append({"name": "x", "type": "space"})
+                else:
+                    axes.append({"name": label, "type": "space"})
+        else:
+            # Default axes based on shape
+            ndim = len(shape)
+            if ndim >= 2:
+                axes.extend([
+                    {"name": "y", "type": "space"},
+                    {"name": "x", "type": "space"}
+                ])
+            if ndim >= 3:
+                axes.insert(-2, {"name": "z", "type": "space"})
+            if ndim >= 4:
+                axes.insert(0, {"name": "c", "type": "channel"})
+            if ndim >= 5:
+                axes.insert(0, {"name": "t", "type": "time"})
+
+            # Add any remaining dimensions as generic space axes
+            while len(axes) < ndim:
+                axes.insert(0, {"name": f"axis_{len(axes)}", "type": "space"})
+
+        return axes
+
+    def _get_final_shape(self) -> tuple[int, ...]:
+        """Calculate the final shape of the array."""
+        if self._current_sequence is None:
+            return (1, 1)  # Fallback
+
+        seq = self._current_sequence
+
+        # Calculate shape based on sequence sizes
+        if seq.sizes:
+            sizes_dict = dict(seq.sizes)
+            t_size = sizes_dict.get('t', 1)
+            z_size = sizes_dict.get('z', 1)
+            c_size = sizes_dict.get('c', 1)
+            p_size = sizes_dict.get('p', 1)
+        else:
+            # Fallback - use simple defaults
+            t_size = 1
+            z_size = 1
+            c_size = len(seq.channels) if seq.channels else 1
+            p_size = len(seq.stage_positions) if seq.stage_positions else 1
+
+        # Get Y, X dimensions from the first frame if available
+        y_size = x_size = 512  # Default
+        if self.frame_metadatas:
+            frame_meta = self.frame_metadatas[0][1]
+            if "Height" in frame_meta:
+                y_size = frame_meta["Height"]
+            if "Width" in frame_meta:
+                x_size = frame_meta["Width"]
+
+        if self._nd_storage:
+            # Multi-dimensional storage
+            shape = []
+            if t_size > 1:
+                shape.append(t_size)
+            if p_size > 1:
+                shape.append(p_size)
+            if c_size > 1:
+                shape.append(c_size)
+            if z_size > 1:
+                shape.append(z_size)
+            shape.extend([y_size, x_size])
+            return tuple(shape)
+        else:
+            # Simple 3D storage (frames, y, x)
+            total_frames = t_size * z_size * c_size * p_size
+            return (total_frames, y_size, x_size)
 
 
 def _merge_nested_dicts(dict1: dict, dict2: Mapping) -> None:
