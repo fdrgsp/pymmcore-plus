@@ -412,7 +412,7 @@ def _build_pixels_object(
 def _build_tiff_data_list(position_frames: list[FrameMetaV1]) -> list[TiffData]:
     """Build TiffData objects for frame metadata at a specific position."""
     tiff_data_blocks = []
-    for frame_metadata in position_frames:
+    for idx, frame_metadata in enumerate(position_frames):
         mda_event = _extract_mda_event(frame_metadata)
         if mda_event is None:  # pragma: no cover
             continue
@@ -424,6 +424,11 @@ def _build_tiff_data_list(position_frames: list[FrameMetaV1]) -> list[TiffData]:
 
         # Create a TiffData block for this plane
         tiff_data = TiffData(
+            # IFD index should match TIFF plane storage order. We assume acquisition
+            # order here since the actual storage order is determined by the writer.
+            # We do not want to leave it as default 0 for all planes since that would
+            # be incorrect if there are multiple planes.
+            ifd=idx,
             first_z=z_index,
             first_c=c_index,
             first_t=t_index,
