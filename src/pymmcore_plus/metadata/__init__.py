@@ -1,3 +1,4 @@
+from ._ome import create_ome_metadata
 from .functions import frame_metadata, summary_metadata
 from .schema import (
     ConfigGroup,
@@ -29,6 +30,7 @@ __all__ = [
     "StagePosition",
     "SummaryMetaV1",
     "SystemInfo",
+    "create_ome_metadata",
     "frame_metadata",
     "json_dumps",
     "summary_metadata",
