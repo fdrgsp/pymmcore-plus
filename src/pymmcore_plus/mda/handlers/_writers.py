@@ -4,10 +4,10 @@ import numpy as np
 import useq
 from ome_writers import OMEStream, create_stream, dims_from_useq
 
-from pymmcore_plus.metadata import FrameMetaV1, SummaryMetaV1
+from pymmcore_plus.metadata import FrameMetaV1, SummaryMetaV1, create_ome_metadata
 
 
-class ZarrNGFFWriter:
+class MMWriter:
 
     def __init__(self, path: Path | str) -> None:
         super().__init__()
@@ -26,16 +26,17 @@ class ZarrNGFFWriter:
 
         self._summary_meta = summary_meta
 
-        if (image_infos := summary_meta.get("image_infos")) is None:
-            raise ValueError("No image infos found in summary meta")
-
-        image_w, image_h = image_infos[0].get("width"), image_infos[0].get("height")
-        if image_w is None or image_h is None:
-            raise ValueError("No width/height found in image infos")
-
-        dtype = image_infos[0].get("dtype")
-        if dtype is None:
-            raise ValueError("No dtype found in image infos")
+        # using try/except to be a bit faster than doing individual .get() and checking
+        # for None (it's ~1.5x faster)
+        try:
+            image_infos = summary_meta["image_infos"][0]
+            image_w, image_h = image_infos["width"], image_infos["height"]
+            dtype = image_infos["dtype"]
+        except Exception as e:
+            raise ValueError(
+                f"Missing image width, height, or dtype information in {summary_meta}:"
+                f" {e}"
+            ) from e
 
         dims = dims_from_useq(sequence, image_w, image_h)
 
@@ -56,8 +57,9 @@ class ZarrNGFFWriter:
         self._stream.flush()
 
         # TODO: once implemented in ome-writers, update the metadata
-        # ome = create_ome_metadata(self._summary_meta, self._frame_meta_list)
-        # self._stream.update_ome_metadata(ome)
+        if hasattr(self._stream, "update_ome_metadata"):
+            ome = create_ome_metadata(self._summary_meta, self._frame_meta_list)
+            self._stream.update_ome_metadata(ome)
 
     def _clear(self) -> None:
         self._summary_meta = {}  # type: ignore
@@ -70,10 +72,11 @@ from pymmcore_plus import CMMCorePlus
 mmc = CMMCorePlus.instance()
 mmc.loadSystemConfiguration("/Users/fdrgsp/Desktop/test_config.cfg")
 
-wrt = ZarrNGFFWriter("/Users/fdrgsp/Desktop/t/z.zarr")
+wrt = MMWriter("/Users/fdrgsp/Desktop/t/file.zarr")
 mmc.mda.events.sequenceStarted.connect(wrt.sequenceStarted)
 
 seq = useq.MDASequence(
     channels=["DAPI", "FITC"],
+    stage_positions=[(0, 0), (10, 0)],
 )
 mmc.mda.run(seq)
