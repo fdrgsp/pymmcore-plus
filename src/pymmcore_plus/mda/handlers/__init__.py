@@ -6,6 +6,7 @@ from ._img_sequence_writer import ImageSequenceWriter
 from ._ome_tiff_writer import OMETiffWriter
 from ._ome_zarr_writer import OMEZarrWriter
 from ._tensorstore_handler import TensorStoreHandler
+from ._writers import MMWriter
 
 __all__ = [
     "ImageSequenceWriter",
@@ -25,11 +26,9 @@ def handler_for_path(path: str | Path) -> object:
         return TensorStoreHandler(kvstore="memory://")
 
     path = str(Path(path).expanduser().resolve())
-    if path.endswith(".zarr"):
-        return OMEZarrWriter(path)
 
-    if path.endswith((".tiff", ".tif")):
-        return OMETiffWriter(path)
+    if path.endswith((".zarr", "tiff", ".tif")):
+        return MMWriter(path)
 
     # FIXME: ugly hack for the moment to represent a non-existent directory
     # there are many features that ImageSequenceWriter supports, and it's unclear
