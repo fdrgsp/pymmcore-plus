@@ -41,6 +41,7 @@ class MMWriter:
         dims = dims_from_useq(sequence, image_w, image_h)
 
         # backend 'auto' with a '.zarr' extension will automatically use 'acquire-zarr'
+        # and with a '.tiff' will use 'tifffile'
         self._stream = create_stream(self._path, dtype, dims, overwrite=True)
 
     def frameReady(
@@ -65,18 +66,3 @@ class MMWriter:
         self._summary_meta = {}  # type: ignore
         self._frame_meta_list = []
         self._stream = None
-
-
-from pymmcore_plus import CMMCorePlus
-
-mmc = CMMCorePlus.instance()
-mmc.loadSystemConfiguration("/Users/fdrgsp/Desktop/test_config.cfg")
-
-wrt = MMWriter("/Users/fdrgsp/Desktop/t/file.zarr")
-mmc.mda.events.sequenceStarted.connect(wrt.sequenceStarted)
-
-seq = useq.MDASequence(
-    channels=["DAPI", "FITC"],
-    stage_positions=[(0, 0), (10, 0)],
-)
-mmc.mda.run(seq)
