@@ -11,9 +11,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
+from pymmcore_plus.mda.handlers._util import position_sizes
 from pymmcore_plus.metadata.serialize import json_dumps, json_loads
-
-from ._util import position_sizes
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
