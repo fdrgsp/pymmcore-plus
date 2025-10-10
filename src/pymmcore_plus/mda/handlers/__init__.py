@@ -3,10 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from ._img_sequence_writer import ImageSequenceWriter
+from ._ome_tiff_writer import OMETiffWriter
 from ._ome_writers import OMEWriterHandler
-from .old._ome_tiff_writer import OMETiffWriter
-from .old._ome_zarr_writer import OMEZarrWriter
-from .old._tensorstore_handler import TensorStoreHandler
+from ._ome_zarr_writer import OMEZarrWriter
+from ._tensorstore_handler import TensorStoreHandler
 
 __all__ = [
     "ImageSequenceWriter",
