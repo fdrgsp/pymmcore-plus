@@ -14,6 +14,16 @@ from ome_writers import create_stream, dims_from_useq
 from pymmcore_plus.metadata import FrameMetaV1, SummaryMetaV1, create_ome_metadata
 from pymmcore_plus.metadata._ome import _extract_dimension_info
 
+# Pre-import tifffile to avoid atexit registration issues during thread execution
+try:
+    # The tifffile import happens lazily when ome_writers creates TifffileStream
+    # instances in threads. Pre-importing it here prevents the "can't register
+    # atexit after shutdown" error.
+    import tifffile  # noqa: F401
+except ImportError:
+    # tifffile may not be available depending on optional dependencies
+    pass
+
 if TYPE_CHECKING:
     from datetime import timedelta
 
@@ -62,7 +72,7 @@ class OMEWriterHandler:
     def sequenceStarted(
         self, sequence: useq.MDASequence, summary_meta: SummaryMetaV1
     ) -> None:
-        self._summary_meta = summary_meta
+        self._summary_metadata = summary_meta
         self._frame_metadatas.clear()
 
         z_step = abs(getattr(sequence.z_plan, "step", 1.0))
@@ -110,8 +120,9 @@ class OMEWriterHandler:
             # since acquire-zarr and tensorstore backends do not have the
             # `update_ome_metadata` method yet, we write the metadata as OME JSON
             # to a separate file for now.
-            out = Path(self.path, "meta.json")
-            out.write_text(ome.model_dump_json(indent=2, exclude_unset=True))
+            with contextlib.suppress(Exception):
+                out = Path(self.path) / "meta.json"
+                out.write_text(ome.model_dump_json(indent=2, exclude_unset=True))
 
     @staticmethod
     def _tmp_dir() -> str:

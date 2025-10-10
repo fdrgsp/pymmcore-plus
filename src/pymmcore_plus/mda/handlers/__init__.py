@@ -23,12 +23,12 @@ def handler_for_path(path: str | Path) -> object:
 
     This method picks from the built-in handlers based on the extension of the path.
     """
-    # if str(path).rstrip("/").rstrip(":").lower() == "memory":
-    #     return TensorStoreHandler(kvstore="memory://")
+    if str(path).rstrip("/").rstrip(":").lower() == "memory":
+        return OMEWriterHandler(path, backend="tensorstore")
 
     path = str(Path(path).expanduser().resolve())
 
-    if path.endswith((".zarr", "tiff", ".tif")):
+    if path.endswith((".zarr", ".tiff", ".tif")):
         return OMEWriterHandler(path)
 
     # FIXME: ugly hack for the moment to represent a non-existent directory
