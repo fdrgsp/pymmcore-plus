@@ -24,7 +24,7 @@ def handler_for_path(path: str | Path) -> object:
     This method picks from the built-in handlers based on the extension of the path.
     """
     if str(path).rstrip("/").rstrip(":").lower() == "memory":
-        return OMEWriterHandler(path, backend="tensorstore")
+        return TensorStoreHandler(kvstore="memory://")
 
     path = str(Path(path).expanduser().resolve())
 
