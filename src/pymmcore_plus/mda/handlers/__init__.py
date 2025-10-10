@@ -11,6 +11,7 @@ from .old._tensorstore_handler import TensorStoreHandler
 __all__ = [
     "ImageSequenceWriter",
     "OMETiffWriter",
+    "OMEWriterHandler",
     "OMEZarrWriter",
     "TensorStoreHandler",
     "handler_for_path",
