@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 import useq
 from yaozarrs import v05
@@ -12,13 +12,54 @@ if TYPE_CHECKING:
 
     from .schema import FrameMetaV1, SummaryMetaV1
 
+__all__ = ["NGFFMetadata", "create_ngff_metadata"]
 
-__all__ = ["create_ngff_metadata"]
+
+class NGFFMetadata(NamedTuple):
+    """Container for NGFF metadata at different hierarchy levels.
+
+    This structure allows consistent handling of single-position, multi-position,
+    and plate acquisitions when writing NGFF/OME-Zarr data to disk.
+
+    Attributes
+    ----------
+    root : v05.Image | v05.Plate | v05.Bf2Raw
+        The top-level group metadata to be written to the root zarr.json file.
+        - For single-position: v05.Image (the image itself)
+        - For multi-position: v05.Bf2Raw (bioformats2raw layout metadata)
+        - For plates: v05.Plate (plate structure with wells)
+
+    images : dict[str, v05.Image]
+        Dictionary mapping relative paths to Image metadata objects.
+        - For single-position: {} (empty - root IS the image)
+        - For multi-position: {"0": Image, "1": Image, ...}
+        - For plates: {"A/1/0": Image, "A/1/1": Image, ...} (well/field paths)
+
+    Examples
+    --------
+    Single position acquisition:
+        NGFFMetadata(root=Image(...), images={})
+
+    Multi-position acquisition (2 positions):
+        NGFFMetadata(
+            root=Bf2Raw(version="0.5", bioformats2raw_layout=3),
+            images={"0": Image(...), "1": Image(...)}
+        )
+
+    Plate acquisition (well A/1 with 2 fields):
+        NGFFMetadata(
+            root=Plate(...),
+            images={"A/1/0": Image(...), "A/1/1": Image(...)}
+        )
+    """
+
+    root: v05.Image | v05.Plate | v05.Bf2Raw
+    images: dict[str, v05.Image]
 
 
 def create_ngff_metadata(
     summary_metadata: SummaryMetaV1, frame_metadata_list: list[FrameMetaV1]
-) -> v05.Image | v05.Plate:
+) -> NGFFMetadata:
     """Create NGFF (OME-Zarr v0.5) metadata from metadata saved by the core engine.
 
     Parameters
@@ -30,13 +71,18 @@ def create_ngff_metadata(
 
     Returns
     -------
-    v05.Image | v05.Plate
-        The NGFF metadata as a `yaozarrs.v05.Image` or `yaozarrs.v05.Plate` object.
+    NGFFMetadata
+        A container with `root` metadata (for top-level zarr.json) and `images`
+        dict mapping paths to Image metadata (for child zarr.json files).
+
+        - Single position: root=Image, images={}
+        - Multi-position: root=Bf2Raw, images={"0": Image, "1": Image, ...}
+        - Plate: root=Plate, images={"A/1/0": Image, ...}
     """
     image_infos = summary_metadata.get("image_infos", ())
     if not frame_metadata_list or not image_infos:
-        # Return minimal valid Image
-        return _create_minimal_image()
+        # Return minimal valid Image with empty images dict
+        return NGFFMetadata(root=_create_minimal_image(), images={})
 
     sequence = _extract_mda_sequence(summary_metadata, frame_metadata_list[0])
 
@@ -171,9 +217,40 @@ def _group_frames_by_position(
         p_index = mda_event.index.get(useq.Axis.POSITION, 0) or 0
         g_index = mda_event.index.get(useq.Axis.GRID, None)
         key = _PositionKey(mda_event.pos_name, p_index, g_index)
-        pos_list = frames_by_position.setdefault(key, [])
-        pos_list.append(frame_metadata)
+        frames_by_position.setdefault(key, []).append(frame_metadata)
+
     return frames_by_position
+
+
+def _group_frames_by_well_field(
+    frame_metadata_list: list[FrameMetaV1],
+    plate_plan: useq.WellPlatePlan,
+) -> dict[tuple[int, int, int], list[FrameMetaV1]]:
+    """Group frame metadata by well (row, col) and field index.
+
+    Returns
+    -------
+    dict[tuple[int, int, int], list[FrameMetaV1]]
+        Mapping of (row_idx, col_idx, field_idx) to list of FrameMetaV1.
+    """
+    frames_by_field: dict[tuple[int, int, int], list[FrameMetaV1]] = {}
+
+    for frame_metadata in frame_metadata_list:
+        if (mda_event := _extract_mda_event(frame_metadata)) is None:
+            continue  # pragma: no cover
+
+        p_index = mda_event.index.get(useq.Axis.POSITION, 0) or 0
+
+        # Find which well and field this position belongs to
+        well_idx, field_idx = divmod(p_index, plate_plan.num_points_per_well)
+
+        # Get row and column from well index
+        if well_idx < len(plate_plan.selected_well_indices):
+            row_idx, col_idx = plate_plan.selected_well_indices[well_idx][:2]
+            key = (row_idx, col_idx, field_idx)
+            frames_by_field.setdefault(key, []).append(frame_metadata)
+
+    return frames_by_field
 
 
 # =============================================================================
@@ -292,11 +369,66 @@ def _build_ngff_image(
     dimension_info: _DimensionInfo,
     sequence: useq.MDASequence | None,
     position_groups: dict[_PositionKey, list[FrameMetaV1]],
-) -> v05.Image:
-    """Build NGFF Image metadata from grouped frame metadata."""
-    # For now, we'll create metadata for the first position
-    # TODO: Handle multiple positions (might need to create separate Image objects)
+) -> NGFFMetadata:
+    """Build NGFF Image metadata from grouped frame metadata.
 
+    For single-position acquisitions, returns NGFFMetadata with Image root.
+    For multi-position acquisitions, returns NGFFMetadata with Bf2Raw root
+    and dict of Image objects (following bioformats2raw layout).
+    """
+    # If we have multiple positions, create separate Image objects with Bf2Raw root
+    if len(position_groups) > 1:
+        images: dict[str, v05.Image] = {}
+        # Sort position keys to ensure consistent ordering
+        sorted_positions = sorted(
+            position_groups.items(),
+            key=lambda x: (x[0].p_index, x[0].g_index or 0)
+        )
+
+        for idx, (position_key, _frames) in enumerate(sorted_positions):
+            axes = _build_axes(sequence, dimension_info)
+            coord_transforms = _build_coordinate_transformations(dimension_info, axes)
+            omero = _build_omero_metadata(sequence)
+
+            # Create dataset entry (path to resolution level 0)
+            datasets = [
+                v05.Dataset(
+                    path="0",
+                    coordinateTransformations=cast(
+                        "list[v05.ScaleTransformation | v05.TranslationTransformation]",
+                        coord_transforms,
+                    ),
+                )
+            ]
+
+            # Create multiscale metadata with position-specific name
+            multiscale = v05.Multiscale(
+                name=str(position_key),
+                axes=cast("list[v05.SpaceAxis | v05.TimeAxis | v05.ChannelAxis | v05.CustomAxis]", axes),  # noqa: E501
+                datasets=datasets,
+            )
+
+            # Build Image for this position
+            image = v05.Image(
+                version="0.5",
+                multiscales=[multiscale],
+            )
+
+            if omero is not None:
+                image.omero = omero
+
+            images[str(idx)] = image
+
+        # Create Bf2Raw root metadata
+        # Note: bioformats2raw_layout field has alias="bioformats2raw.layout"
+        bf2raw_root = v05.Bf2Raw(
+            version="0.5",
+            **{"bioformats2raw.layout": 3},  # type: ignore[arg-type]
+        )
+
+        return NGFFMetadata(root=bf2raw_root, images=images)
+
+    # Single position - return NGFFMetadata with Image root and empty images dict
     axes = _build_axes(sequence, dimension_info)
     coord_transforms = _build_coordinate_transformations(dimension_info, axes)
     omero = _build_omero_metadata(sequence)
@@ -305,14 +437,20 @@ def _build_ngff_image(
     datasets = [
         v05.Dataset(
             path="0",
-            coordinateTransformations=coord_transforms,
+            coordinateTransformations=cast(
+                "list[v05.ScaleTransformation | v05.TranslationTransformation]",
+                coord_transforms,
+            ),
         )
     ]
 
     # Create multiscale metadata
     multiscale = v05.Multiscale(
         name="image",
-        axes=axes,
+        axes=cast(
+            "list[v05.SpaceAxis | v05.TimeAxis | v05.ChannelAxis | v05.CustomAxis]",
+            axes,
+        ),
         datasets=datasets,
     )
 
@@ -325,7 +463,7 @@ def _build_ngff_image(
     if omero is not None:
         image.omero = omero
 
-    return image
+    return NGFFMetadata(root=image, images={})
 
 
 def _build_ngff_plate(
@@ -333,8 +471,12 @@ def _build_ngff_plate(
     dimension_info: _DimensionInfo,
     sequence: useq.MDASequence | None,
     frame_metadata_list: list[FrameMetaV1],
-) -> v05.Plate:
-    """Build NGFF Plate metadata from a WellPlatePlan."""
+) -> NGFFMetadata:
+    """Build NGFF Plate metadata from a WellPlatePlan.
+    
+    Returns NGFFMetadata with Plate root and dict of Image objects
+    for each field (well/field path like "A/1/0").
+    """
     # Build plate rows and columns from selected wells
     # Get unique row and column indices from selected wells
     selected_rows = sorted({row for row, _, *_ in plate_plan.selected_well_indices})
@@ -381,7 +523,50 @@ def _build_ngff_plate(
         field_count=plate_plan.num_points_per_well,
     )
 
-    return v05.Plate(
+    plate_root = v05.Plate(
         version="0.5",
         plate=plate_def,
     )
+
+    # Build Image objects for each field
+    # Group frames by well and field
+    images: dict[str, v05.Image] = {}
+    field_groups = _group_frames_by_well_field(frame_metadata_list, plate_plan)
+
+    for (row_idx, col_idx, field_idx), _frames in field_groups.items():
+        row_name = chr(65 + row_idx)
+        col_name = f"{col_idx + 1:02d}"
+        field_path = f"{row_name}/{col_name}/{field_idx}"
+
+        # Build Image metadata for this field
+        axes = _build_axes(sequence, dimension_info)
+        coord_transforms = _build_coordinate_transformations(dimension_info, axes)
+        omero = _build_omero_metadata(sequence)
+
+        datasets = [
+            v05.Dataset(
+                path="0",
+                coordinateTransformations=cast(
+                    "list[v05.ScaleTransformation | v05.TranslationTransformation]",
+                    coord_transforms,
+                ),
+            )
+        ]
+
+        multiscale = v05.Multiscale(
+            name=f"field_{field_idx}",
+            axes=cast("list[v05.SpaceAxis | v05.TimeAxis | v05.ChannelAxis | v05.CustomAxis]", axes),  # noqa: E501
+            datasets=datasets,
+        )
+
+        image = v05.Image(
+            version="0.5",
+            multiscales=[multiscale],
+        )
+
+        if omero is not None:
+            image.omero = omero
+
+        images[field_path] = image
+
+    return NGFFMetadata(root=plate_root, images=images)
