@@ -66,12 +66,20 @@ class OMEWriterHandler:
         self.backend: Literal[BackendName, "auto"] = backend
         self.overwrite = overwrite
 
+        self._sequence: useq.MDASequence | None = None
+
+        # TODO: it is better to save these metadata to disk in case of large sequences
         self._summary_metadata: SummaryMetaV1 | None = None
         self._frame_metadatas: list[FrameMetaV1] = []
+
+    @property
+    def sequence(self) -> useq.MDASequence | None:
+        return self._sequence
 
     def sequenceStarted(
         self, sequence: useq.MDASequence, summary_meta: SummaryMetaV1
     ) -> None:
+        self._sequence = sequence
         self._summary_metadata = summary_meta
         self._frame_metadatas.clear()
 
