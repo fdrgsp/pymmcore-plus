@@ -21,7 +21,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest]
-        python-version: ["3.10", "3.11", "3.13"]
+        python-version: ["3.10", "3.11", "3.13", "3.14"]
         include:
           - os: macos-15-intel
             python-version: "3.12"
@@ -69,15 +69,7 @@ jobs:
           uv pip install pymmcore-nano
           uv pip uninstall pymmcore
 
-      - name: Get pymmcore version (env)
-        shell: bash
-        run: |
-          ver=$(uv run python -c 'from pymmcore_plus import _pymmcore;print(_pymmcore.version_info.device_interface)')
-          echo "PYMM_VERSION=$ver" >> $GITHUB_ENV
-
       - uses: pymmcore-plus/setup-mm-test-adapters@main
-        with:
-          version: ${{ env.PYMM_VERSION }}
 
       - run: uv run coverage run -p -m pytest -v --color=yes ${{ matrix.resolution == 'lowest-direct' && '-W ignore' || '' }}
 
@@ -129,16 +121,7 @@ jobs:
           uv pip install ./pymmcore-plus
           uv pip list
 
-      - name: Get pymmcore version (env)
-        shell: bash
-        run: |
-          ver=$(uv run python -c 'from pymmcore_plus import _pymmcore;print(_pymmcore.version_info.device_interface)')
-          echo "PYMM_VERSION=$ver" >> $GITHUB_ENV
-
-      - name: Setup MM test adapters
-        uses: pymmcore-plus/setup-mm-test-adapters@main
-        with:
-          version: ${{ env.PYMM_VERSION }}
+      - uses: pymmcore-plus/setup-mm-test-adapters@main
 
       - run: uv run pytest -v --color=yes -W ignore
 
@@ -180,16 +163,7 @@ jobs:
           uv pip install ./pymmcore-plus
           uv pip list
 
-      - name: Get pymmcore version (env)
-        shell: bash
-        run: |
-          ver=$(uv run python -c 'from pymmcore_plus import _pymmcore;print(_pymmcore.version_info.device_interface)')
-          echo "PYMM_VERSION=$ver" >> $GITHUB_ENV
-
-      - name: Setup MM test adapters
-        uses: pymmcore-plus/setup-mm-test-adapters@main
-        with:
-          version: ${{ env.PYMM_VERSION }}
+      - uses: pymmcore-plus/setup-mm-test-adapters@main
 
       - run: uv run pytest -v --color=yes -W ignore
 
@@ -207,21 +181,12 @@ jobs:
       - name: install
         run: uv sync --no-dev --group test-codspeed
 
-      - name: Cache Linux Build
-        id: cache-mm-build
-        uses: actions/cache@v5
-        with:
-          path: ~/.local/share/pymmcore-plus/
-          key: ${{ runner.os }}-mmbuild-74-${{ hashFiles('src/pymmcore_plus/_build.py') }}
-
-      - name: Build Micro-Manager
-        if: steps.cache-mm-build.outputs.cache-hit != 'true'
-        run: uv run mmcore build-dev
+      - uses: pymmcore-plus/setup-mm-test-adapters@main
 
       - name: Run benchmarks
         uses: CodSpeedHQ/action@v4
         with:
-          mode: instrumentation
+          mode: simulation
           run: uv run pytest -W ignore --codspeed -v --color=yes
 
   deploy:
