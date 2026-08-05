@@ -17,7 +17,7 @@ __all__ = ["logger"]
 logger = logging.getLogger("pymmcore-plus")
 
 PYMM_LOG_FILE = os.getenv("PYMM_LOG_FILE", "")
-DEFAULT_LOG_LEVEL: str = os.getenv("PYMM_LOG_LEVEL", "INFO").upper()
+DEFAULT_LOG_LEVEL: str = os.getenv("PYMM_LOG_LEVEL", "WARNING").upper()
 
 if "PYTEST_RUNNING" in os.environ:
     LOG_FILE = None
@@ -79,6 +79,9 @@ def configure_logging(
     - `PYMM_LOG_LEVEL` - The log level for `stderr` logging. By default `INFO`.
     - `PYMM_LOG_FILE` - The path to the log file.  If set to `0`, `false`, `no`,
         or `none`, logging to file will be disabled.
+    - `PYMM_LOG_RICH` - If set to `1`, `true`, or `yes`, use `rich` for stderr
+        logging (requires `rich` to be installed). Note: rich formatting adds
+        some overhead; see https://github.com/pymmcore-plus/pymmcore-plus/issues/449.
 
 
     !!! note
@@ -113,18 +116,23 @@ def configure_logging(
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
 
-    for handler in logger.handlers:
+    for handler in list(logger.handlers):
         logger.removeHandler(handler)
+        handler.close()
 
     # automatically log to stderr
     if log_to_stderr and sys.stderr:
-        # try to use rich for stderr logging
-        # fallback to plain text if rich is not installed
-        try:
-            from rich.logging import RichHandler
+        # use rich for stderr logging if PYMM_LOG_RICH is set and rich is installed
+        stderr_handler: logging.Handler | None = None
+        if os.getenv("PYMM_LOG_RICH", "").lower() in ("1", "true", "yes"):
+            try:
+                from rich.logging import RichHandler
 
-            stderr_handler: logging.Handler = RichHandler()
-        except ImportError:
+                stderr_handler = RichHandler()
+            except ImportError:
+                pass
+
+        if stderr_handler is None:
             stderr_handler = logging.StreamHandler(sys.stderr)
             stderr_handler.setFormatter(CustomFormatter())
 
