@@ -51,6 +51,28 @@ class OmeWritersSink(SinkProtocol):
         self._stream: OMEStream | None = None
         self._summary_meta: SummaryMetaV1 | None = None
 
+    @property
+    def settings(self) -> AcquisitionSettings:
+        """The acquisition settings used to create the stream.
+
+        Before `setup()` has run, this is whatever was passed to (or derived by
+        `from_output` for) `__init__`. After `setup()`, it has been fully
+        resolved (dimensions, dtype, etc. filled in from the sequence and the
+        engine's summary metadata) and reflects exactly what was passed to
+        `ome_writers.create_stream()`.
+        """
+        return self._settings
+
+    @property
+    def summary_meta(self) -> SummaryMetaV1 | None:
+        """The `SummaryMetaV1` passed to `setup()`, or `None` before that."""
+        return self._summary_meta
+
+    @property
+    def stream(self) -> OMEStream | None:
+        """The underlying `ome_writers.OMEStream`, or `None` before `setup()`."""
+        return self._stream
+
     @classmethod
     def from_output(
         cls,
@@ -142,7 +164,7 @@ class OmeWritersSink(SinkProtocol):
         self._set_summary_metadata()
 
     def append(self, img: np.ndarray, event: MDAEvent, meta: FrameMetaV1) -> None:
-        self._stream.append(img, frame_metadata=_frame_meta_to_ome(meta))  # type: ignore[union-attr]
+        self._stream.append(img, frame_metadata=frame_meta_to_ome(meta))  # type: ignore[union-attr]
 
     def skip(self, *, frames: int = 1) -> None:
         self._stream.skip(frames=frames)  # type: ignore[union-attr]
@@ -203,8 +225,15 @@ def _unbounded_3d_settings(
     }
 
 
-def _frame_meta_to_ome(meta: FrameMetaV1) -> dict:
-    """Convert FrameMetaV1 to ome-writers frame_metadata dict."""
+def frame_meta_to_ome(meta: FrameMetaV1) -> dict:
+    """Convert `FrameMetaV1` to the `frame_metadata` dict `OMEStream.append` expects.
+
+    This is the exact mapping `OmeWritersSink` uses for a live, disk-backed
+    acquisition -- exposed publicly so anything replaying frames through a
+    *new* stream (e.g. exporting an in-memory/"scratch" run to disk) can
+    reproduce the same per-frame metadata instead of re-deriving the key
+    names itself.
+    """
     # TODO:
     # decide whether we should be passing *everything* else from FrameMetaV1
     # after converting/popping a few special keys...

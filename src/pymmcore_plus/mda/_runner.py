@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import types
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from enum import Enum
@@ -75,6 +75,16 @@ if TYPE_CHECKING:
         @property
         def ndim(self) -> int: ...
         def __getitem__(self, key: Any) -> np.ndarray: ...
+        # The following are optional -- not every sink's view can provide them.
+        # Consumers should use getattr(view, "dims", None), etc. `ome_writers`'
+        # `StreamView` (the view returned by the built-in `OmeWritersSink`)
+        # provides all three.
+        @property
+        def dims(self) -> tuple[str, ...]: ...
+        @property
+        def coords(self) -> Mapping[Any, Any]: ...
+        @property
+        def coords_changed(self) -> Any: ...
 
 
 SupportsFrameReady: TypeAlias = "FrameReady0 | FrameReady1 | FrameReady2 | FrameReady3"
@@ -422,6 +432,16 @@ class MDARunner:
         if self._sink is None:  # pragma: no cover
             return None
         return self._sink.get_view()
+
+    def get_sink(self) -> SinkProtocol | None:
+        """Return the data sink for the current (or most recently finished) run.
+
+        The sink is created fresh each time `run()` is called (from the `output`
+        argument), so this reflects only the most recent run -- it is replaced,
+        not merged, the next time `run()` is called. Returns `None` if `run()`
+        has not been called yet, or if it was called with `output=None`.
+        """
+        return self._sink
 
     @deprecated(
         "`get_output_handlers` is deprecated, and no full replacement planned. "
