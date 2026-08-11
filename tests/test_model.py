@@ -257,24 +257,26 @@ def test_dirty():
 # but has peripherals that are visible only after calling initializeDevice
 # Ti2 is an example of a library that has multiple hubs... are there better ones?
 @pytest.mark.parametrize(
-    "lib, hub", [("SequenceTester", "THub"), ("NikonTi2", "Ti2-E__0")]
+    "lib, hub_adapter", [("SequenceTester", "THub"), ("NikonTi2", "Ti2-E__0")]
 )
-def test_hubs(lib: str, hub: str) -> None:
+def test_hubs_with_custom_label(lib: str, hub_adapter: str) -> None:
     """Make sure that calling load_available_devices() on a model after loading
-    a hub device will find all peripherals when using dev.available_peripherals."""
+    a hub device under a custom label will find all peripherals when using
+    dev.available_peripherals."""
     core = CMMCorePlus()
     model = Microscope()
+    hub_label = "RenamedHub"
 
     try:
-        core.loadDevice(hub, lib, hub)
+        core.loadDevice(hub_label, lib, hub_adapter)
     except Exception:
-        pytest.xfail(reason=f"{lib}, {hub} Not Available")
+        pytest.xfail(reason=f"{lib}, {hub_adapter} Not Available")
         return
 
-    core.initializeDevice(hub)
+    core.initializeDevice(hub_label)
 
     # successful closing of the dialog will have loaded and initialized the device.
-    dev = Device.create_from_core(core, name=hub)
+    dev = Device.create_from_core(core, name=hub_label)
 
     model.load_available_devices(core)
     assert model.available_devices

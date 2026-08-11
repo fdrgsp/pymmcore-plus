@@ -443,15 +443,16 @@ def get_available_devices(core: CMMCorePlus) -> list[AvailableDevice]:
     # visible after a hub device has been loaded.
     # HACK: this is a bit of a hack, but it's due to the (multiple) ways that
     # hub devices and child devices work in MMCore
-    for hub in core.getLoadedDevicesOfType(DeviceType.Hub):
-        lib_name = core.getDeviceLibrary(hub)
-        hub_dev = library_to_hub.get((lib_name, hub))
+    for hub_label in core.getLoadedDevicesOfType(DeviceType.Hub):
+        lib_name = core.getDeviceLibrary(hub_label)
+        hub_adapter = core.getDeviceName(hub_label)
+        hub_dev = library_to_hub.get((lib_name, hub_adapter))
         if (
-            core.getDeviceInitializationState(hub)
+            core.getDeviceInitializationState(hub_label)
             != DeviceInitializationState.InitializedSuccessfully
         ):
             continue
-        for child in core.getInstalledDevices(hub):
+        for child in core.getInstalledDevices(hub_label):
             dev = AvailableDevice(
                 library=lib_name, adapter_name=child, library_hub=hub_dev
             )
