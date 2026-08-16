@@ -141,6 +141,13 @@ def discover_mm() -> Iterator[DiscoveredMM]:
     """Discover Micro-Manager installations with caching and dedup by path."""
     yielded: set[Path] = set()
 
+    # An installation can go away while the process runs (uninstalled, or on a
+    # volume that was unmounted). Nothing else ever evicts from the cache, so
+    # without this an entry outlives the directory it describes and keeps being
+    # reported as discovered.
+    for stale in [p for p in _DISCOVERED_MMS if not p.is_dir()]:
+        del _DISCOVERED_MMS[stale]
+
     for candidate in _iter_mm_paths():
         key = candidate.path
         existing = _DISCOVERED_MMS.get(key)
@@ -206,8 +213,11 @@ def find_micromanager(return_first: bool = True) -> str | None | list[str]:
     """
     from ._logger import logger
 
+    found: list[str] = []
     for discovered_mm in discover_mm():
-        if return_first:
+        if not return_first:
+            found.append(str(discovered_mm.path))
+        else:
             # If the path was explicitly provided via the MICROMANAGER_PATH
             # environment variable, prefer it even if it doesn't currently
             # contain device adapter libraries. This allows users (and tests)
@@ -254,7 +264,8 @@ def find_micromanager(return_first: bool = True) -> str | None | list[str]:
         )
         return None
 
-    return [str(d.path) for d in _DISCOVERED_MMS.values()]
+    # what this scan actually found, not everything the cache has ever seen
+    return found
 
 
 def _match_mm_pattern(pattern: str | re.Pattern[str]) -> Path | None:
