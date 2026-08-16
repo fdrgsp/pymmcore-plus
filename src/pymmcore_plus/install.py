@@ -240,6 +240,7 @@ def _get_platform_arch_string() -> str:
 def _test_dev_install(
     dest: Path | str = USER_DATA_MM_PATH,
     release: str = "latest",
+    log_msg: _MsgLogger = _pretty_print,
 ) -> None:
     """Install just the test devices into dest.
 
@@ -302,7 +303,14 @@ def _test_dev_install(
         # Download the zip file
         zip_path = Path(tmpdir) / filename
         _download_url(
-            url=download_url, output_path=zip_path, show_progress=progress is not None
+            url=download_url,
+            output_path=zip_path,
+            # A caller that replaced the logger (`mmcore install
+            # --plain-output`, i.e. anything scripting or piping this) is not
+            # attached to a terminal, so a rich progress bar would only spray
+            # color and cursor escapes into its output. Same rule the nightly
+            # branch of install() uses.
+            show_progress=progress is not None and log_msg is _pretty_print,
         )
 
         # Extract the zip file
@@ -370,7 +378,7 @@ def install(
         Whether to install test adapters, by default False.
     """
     if test_adapters:
-        _test_dev_install(dest=dest, release=release)
+        _test_dev_install(dest=dest, release=release, log_msg=log_msg)
         return
 
     if PLATFORM not in ("Darwin", "Windows") or (
@@ -382,7 +390,7 @@ def install(
             "bold magenta",
             ":exclamation:",
         )
-        _test_dev_install(dest=dest, release=release)
+        _test_dev_install(dest=dest, release=release, log_msg=log_msg)
         return
 
     if release == "latest-compatible":
