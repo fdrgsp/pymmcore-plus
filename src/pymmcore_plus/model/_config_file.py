@@ -62,10 +62,17 @@ def yield_date(scope: Microscope) -> Iterable[str]:
 
 
 def iter_devices(scope: Microscope) -> Iterable[str]:
-    for d in scope.assigned_com_ports:
-        yield _serialize(CFGCommand.Device, d.name, d.library, d.adapter_name)
-    for d in scope.devices:
-        yield _serialize(CFGCommand.Device, d.name, d.library, d.adapter_name)
+    # An assigned com port is written first, so it exists by the time the device
+    # claiming it sets its pre-init "Port" property.  It may *also* be in
+    # scope.devices -- a model built from a core (or parsed from a config file)
+    # lists every loaded device, com ports included -- and writing it twice
+    # produces a file MMCore refuses to load: 'The specified device label "COM3"
+    # is already in use'.
+    seen: set[str] = set()
+    for d in (*scope.assigned_com_ports, *scope.devices):
+        if d.name not in seen:
+            seen.add(d.name)
+            yield _serialize(CFGCommand.Device, d.name, d.library, d.adapter_name)
 
 
 # NOTE/TODO:
@@ -89,7 +96,14 @@ def iter_pre_init_props(scope: Microscope) -> Iterable[str]:
 
 
 def iter_com_port_props(scope: Microscope) -> Iterable[str]:
+    # A port that is also a loaded device already had these written above, from
+    # the instance carrying the values actually in use.  The available_devices
+    # instance reached here may only have adapter defaults, and this section
+    # comes later in the file, so re-writing it would overwrite them on load.
+    loaded = {d.name for d in scope.devices}
     for dev in scope.assigned_com_ports:
+        if dev.name in loaded:
+            continue
         for p in dev.properties:
             if p.is_pre_init:
                 yield _serialize(CFGCommand.Property, p.device_name, p.name, p.value)

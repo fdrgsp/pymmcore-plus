@@ -282,3 +282,44 @@ def test_hubs_with_custom_label(lib: str, hub_adapter: str) -> None:
     assert model.available_devices
     peripherals = list(dev.available_peripherals(model))
     assert peripherals
+
+
+def test_assigned_com_port_written_once(tmp_path: Path) -> None:
+    """A com port that is *also* a loaded device must not be written twice.
+
+    A model built from a core (or parsed from a config file) lists every loaded
+    device, com ports included, while assigned_com_ports independently derives
+    the same port from available_devices.  Writing both produced a file that
+    MMCore refused to load with 'device label "COM3" is already in use'.
+    """
+    from pymmcore_plus.model import Property
+
+    port = Device(name="COM3", library="SerialManager", adapter_name="COM3")
+    port.device_type = DeviceType.Serial
+    port.properties = [
+        Property(device_name="COM3", name="BaudRate", value="115200", is_pre_init=True)
+    ]
+    hub = Device(name="Hub", library="SomeLib", adapter_name="SomeHub")
+    hub.properties = [
+        Property(device_name="Hub", name="Port", value="COM3", is_pre_init=True)
+    ]
+
+    # the available_devices instance carries adapter defaults, not the values in use
+    available = Device(name="COM3", library="SerialManager", adapter_name="COM3")
+    available.device_type = DeviceType.Serial
+    available.properties = [
+        Property(device_name="COM3", name="BaudRate", value="9600", is_pre_init=True)
+    ]
+
+    scope = Microscope(devices=[port, hub])
+    scope._available_devices = (available,)  # type: ignore [assignment]
+    assert scope.assigned_com_ports
+
+    dest = tmp_path / "with_com_port.cfg"
+    scope.save(dest)
+    lines = non_empty_lines(dest)
+
+    assert lines.count("Device,COM3,SerialManager,COM3") == 1
+    # ...and the value actually in use survives, rather than being overwritten by
+    # the default from the available_devices instance later in the file
+    assert [ln for ln in lines if "BaudRate" in ln] == ["Property,COM3,BaudRate,115200"]
