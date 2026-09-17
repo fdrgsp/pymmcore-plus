@@ -144,6 +144,11 @@ class MDAEngine(PMDAEngine):
         self._af_was_engaged: bool = False
         # used to store the success of the last _execute_autofocus call
         self._af_succeeded: bool = False
+        # set to True right after a successful autofocus action (if it was engaged
+        # at the start of the sequence); consumed (and reset to False) the next time
+        # we re-engage continuous focus, so we only do so once per autofocus action
+        # instead of before every subsequent image event.
+        self._af_needs_reengage: bool = False
 
         # used for one_shot autofocus to store the z correction for each position index.
         # map of {position_index: z_correction}
@@ -237,6 +242,7 @@ class MDAEngine(PMDAEngine):
         self._update_config_device_props()
         # get if the autofocus is engaged at the start of the sequence
         self._af_was_engaged = core.isContinuousFocusLocked()
+        self._af_needs_reengage = False
 
         # capture initial state if restoration is enabled
         if self.restore_initial_state is None:
@@ -320,6 +326,7 @@ class MDAEngine(PMDAEngine):
                 # execute hardware autofocus
                 new_correction = self._execute_autofocus(action)
                 self._af_succeeded = True
+                self._af_needs_reengage = self._af_was_engaged
             except RuntimeError as e:
                 logger.warning("Hardware autofocus failed. %s", e)
                 self._af_succeeded = False
@@ -338,11 +345,15 @@ class MDAEngine(PMDAEngine):
         if not isinstance(action, (AcquireImage, type(None))):
             return
 
-        # if the autofocus was engaged at the start of the sequence AND autofocus action
-        # did not fail, re-engage it. NOTE: we need to do that AFTER the runner calls
-        # `setup_event`, so we can't do it inside the exec_event autofocus action above.
-        if self._af_was_engaged and self._af_succeeded:
+        # if the autofocus was engaged at the start of the sequence AND the autofocus
+        # action that just ran succeeded, re-engage it. NOTE: we need to do that AFTER
+        # the runner calls `setup_event`, so we can't do it inside the exec_event
+        # autofocus action above. We only do this once per autofocus action (not
+        # before every subsequent image event) to avoid redundantly re-triggering
+        # hardware autofocus devices (e.g. Nikon PFS) that react to every call.
+        if self._af_needs_reengage:
             core.enableContinuousFocus(True)
+            self._af_needs_reengage = False
 
         if isinstance(event, SequencedEvent):
             yield from self.exec_sequenced_event(event)

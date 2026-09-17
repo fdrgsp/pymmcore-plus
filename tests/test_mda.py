@@ -182,6 +182,33 @@ def test_autofocus_retries(core: CMMCorePlus, mock_fullfocus_failure: Any) -> No
     assert core.getZPosition() == 25
 
 
+def test_autofocus_reengage_once_per_position(
+    core: CMMCorePlus, mock_fullfocus: Any
+) -> None:
+    """`enableContinuousFocus(True)` should only be called once per autofocus
+    action, not before every subsequent image event (e.g. every grid tile).
+
+    https://github.com/pymmcore-plus/pymmcore-plus (PFS beeping on every event)
+    """
+    mda = MDASequence(
+        stage_positions=[
+            {"sequence": {"grid_plan": {"rows": 1, "columns": 2}}},
+            {"sequence": {"grid_plan": {"rows": 1, "columns": 2}}},
+        ],
+        autofocus_plan=AFPlan,
+    )
+
+    with (
+        patch.object(core, "isContinuousFocusLocked", return_value=True),
+        patch.object(core, "enableContinuousFocus") as mock_enable,
+    ):
+        core.mda.run(mda)
+
+    # one re-engage call per position (2 positions), not one per image event (4)
+    true_calls = [c for c in mock_enable.call_args_list if c.args == (True,)]
+    assert len(true_calls) == 2
+
+
 def test_set_mda_fov(core: CMMCorePlus) -> None:
     """Test that the fov size is updated."""
     mda = MDASequence(
