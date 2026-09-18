@@ -444,6 +444,34 @@ class MDARunner:
         """
         return self._sink
 
+    def release_sink(self, sink: SinkProtocol | None = None) -> bool:
+        """Drop the runner's reference to the most recent run's data sink.
+
+        The runner keeps the last sink (see `get_sink`) until the next `run()`.
+        Call this once that data is no longer needed (e.g. its viewer was
+        closed) so it can be garbage collected, freeing its memory and any
+        temporary files. Other references to the sink or its views (from
+        `get_sink()` or `get_view()`) keep it alive.
+
+        Parameters
+        ----------
+        sink : SinkProtocol | None
+            If given, only release if it is still the runner's current sink,
+            so releasing an older run's data never drops a newer run's.
+
+        Returns
+        -------
+        bool
+            True if the reference was dropped. False if an acquisition is
+            running, or `sink` is not the current sink.
+        """
+        if self.is_running() or self._sink is None:
+            return False
+        if sink is not None and sink is not self._sink:
+            return False
+        self._sink = None
+        return True
+
     @deprecated(
         "`get_output_handlers` is deprecated, and no full replacement planned. "
         "Use `get_sink()` instead, to monitor the data as it is being acquired.",

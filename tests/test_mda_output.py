@@ -80,6 +80,41 @@ def test_get_view_no_sink() -> None:
     assert MDARunner().get_view() is None
 
 
+def test_release_sink(core: CMMCorePlus) -> None:
+    import gc
+    import weakref
+
+    runner = core.mda
+    assert not runner.release_sink()  # nothing to release yet
+
+    seq = useq.MDASequence(time_plan=useq.TIntervalLoops(interval=0, loops=2))
+    runner.run(seq, output="memory")
+    sink = runner.get_sink()
+    assert sink is not None
+
+    # a sink that isn't the current one is never released
+    assert not runner.release_sink(Mock())
+    assert runner.get_sink() is sink
+
+    ref = weakref.ref(sink)
+    assert runner.release_sink(sink)
+    assert runner.get_sink() is None
+    assert runner.get_view() is None
+    del sink
+    gc.collect()
+    assert ref() is None
+
+
+def test_release_sink_while_running(core: CMMCorePlus) -> None:
+    runner = core.mda
+    seq = useq.MDASequence(time_plan=useq.TIntervalLoops(interval=0, loops=2))
+    released: list[bool] = []
+    runner.events.frameReady.connect(lambda *_: released.append(runner.release_sink()))
+    runner.run(seq, output="memory")
+    assert released == [False, False]
+    assert runner.get_sink() is not None
+
+
 def test_run_with_zarr_output(core: CMMCorePlus, tmp_path: Path) -> None:
     runner = core.mda
     seq = useq.MDASequence(time_plan=useq.TIntervalLoops(interval=0, loops=2))
