@@ -7,19 +7,23 @@ if TYPE_CHECKING:
 
 
 def get_full_sequence_axes(sequence: useq.MDASequence) -> tuple[str, ...]:
-    """Get the combined axes from sequence and sub-sequences."""
-    # axes main sequence
-    main_seq_axes = list(sequence.used_axes)
-    if not sequence.stage_positions:
-        return tuple(main_seq_axes)
-    # axes from sub sequences
-    sub_seq_axes: list = []
-    for p in sequence.stage_positions:
-        if p.sequence is not None:
-            sub_seq_axes.extend(
-                [ax for ax in p.sequence.used_axes if ax not in main_seq_axes]
-            )
-    return tuple(main_seq_axes + sub_seq_axes)
+    """Get all root and sub-sequence axes in the root acquisition order."""
+    axes = set(sequence.used_axes)
+    extra_axes: list[str] = []
+    positions = list(sequence.stage_positions)
+
+    while positions:
+        position = positions.pop(0)
+        if subsequence := position.sequence:
+            for axis in subsequence.used_axes:
+                if axis not in axes:
+                    axes.add(axis)
+                    extra_axes.append(axis)
+            positions.extend(subsequence.stage_positions)
+
+    ordered = [axis for axis in sequence.axis_order if axis in axes]
+    ordered.extend(axis for axis in extra_axes if axis not in ordered)
+    return tuple(ordered)
 
 
 def position_sizes(seq: useq.MDASequence) -> list[dict[str, int]]:
@@ -29,18 +33,23 @@ def position_sizes(seq: useq.MDASequence) -> list[dict[str, int]]:
     `{dim: size}` pairs for each dimension in the sequence. Dimensions with no size
     will be omitted, though singletons will be included.
     """
+    axes = get_full_sequence_axes(seq)
     main_sizes = dict(seq.sizes)
     main_sizes.pop("p", None)  # remove position
 
     if not seq.stage_positions:
         # this is a simple MDASequence
-        return [{k: v for k, v in main_sizes.items() if v}]
+        return [{axis: main_sizes[axis] for axis in axes if main_sizes.get(axis)}]
 
     sizes = []
-    for p in seq.stage_positions:
-        if p.sequence is not None:
-            psizes = {k: v or main_sizes.get(k, 0) for k, v in p.sequence.sizes.items()}
-        else:
-            psizes = main_sizes.copy()
-        sizes.append({k: v for k, v in psizes.items() if v and k != "p"})
+    for position in seq.stage_positions:
+        subsequence_sizes = dict(position.sequence.sizes) if position.sequence else {}
+        sizes.append(
+            {
+                axis: size
+                for axis in axes
+                if axis != "p"
+                and (size := subsequence_sizes.get(axis) or main_sizes.get(axis))
+            }
+        )
     return sizes

@@ -11,6 +11,7 @@ import useq
 from pymmcore_plus import CMMCorePlus
 from pymmcore_plus.mda import mda_listeners_connected
 from pymmcore_plus.mda.handlers import ImageSequenceWriter
+from pymmcore_plus.mda.handlers._util import get_full_sequence_axes, position_sizes
 
 if TYPE_CHECKING:
     import tifffile as tf  # noqa
@@ -73,15 +74,43 @@ def test_tiff_with_subseries(tmp_path: Path, core: CMMCorePlus) -> None:
     assert len(files_written) == len(list(mda))
     # we can use tifffile pattern='axes' to load the data in the correct
     # shape because write a filename pattern that tifffile recognizes (Leica tiff)
-    # 00004_p001_c01_g000.tif
+    # 00004_p001_g000_c01.tif
 
-    data = tf.imread(f"{dest}/*.tif", pattern=r"_(p)(\d+)_(c)(\d+)_(g)(\d+)")
+    data = tf.imread(f"{dest}/*.tif", pattern=r"_(p)(\d+)_(g)(\d+)_(c)(\d+)")
     assert isinstance(data, np.ndarray)
-    assert data.shape[:-2] == (2, 1, 3)  # 2 positions, 1 channel, 3 grid positions
+    assert data.shape[:-2] == (2, 3, 1)  # 2 positions, 3 grid positions, 1 channel
 
     # note that when loading this way... some of the frames will be empty
     # it's not critical to test it, but this would be True:
     # assert np.array_equal(data[0, 0, 1], np.zeros((512, 512)))  # no grid on pos 1
+
+
+@pytest.mark.parametrize(
+    ("axis_order", "expected_axes", "expected_sizes"),
+    [
+        ("pgc", ("p", "g", "c"), {"g": 2, "c": 2}),
+        ("pcg", ("p", "c", "g"), {"c": 2, "g": 2}),
+    ],
+)
+def test_subsequence_axes_use_root_order(
+    axis_order: str,
+    expected_axes: tuple[str, ...],
+    expected_sizes: dict[str, int],
+) -> None:
+    sequence = useq.MDASequence(
+        axis_order=axis_order,
+        channels=["DAPI", "FITC"],
+        stage_positions=[
+            useq.Position(
+                sequence=useq.MDASequence(
+                    grid_plan=useq.GridRowsColumns(rows=1, columns=2)
+                )
+            )
+        ],
+    )
+
+    assert get_full_sequence_axes(sequence) == expected_axes
+    assert position_sizes(sequence) == [expected_sizes]
 
 
 def test_any_writer(tmp_path: Path, core: CMMCorePlus) -> None:

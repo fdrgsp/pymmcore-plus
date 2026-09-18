@@ -102,6 +102,7 @@ dev = [
 
 [tool.uv.sources]
 pymmcore-plus = { workspace = true }
+useq-schema = { git = "https://github.com/fdrgsp/useq-schema", rev = "cite" }
 
 [tool.uv]
 override-dependencies = [
