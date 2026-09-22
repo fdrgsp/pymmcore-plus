@@ -5,6 +5,7 @@ from ._runner import (
     MDARunner,
     RunnerStatus,
     RunState,
+    SingleOutput,
     SkipEvent,
     SupportsFrameReady,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "PMDASignaler",
     "RunState",
     "RunnerStatus",
+    "SingleOutput",
     "SinkProtocol",
     "SkipEvent",
     "SupportsFrameReady",
