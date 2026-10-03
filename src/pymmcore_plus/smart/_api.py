@@ -24,6 +24,7 @@ API_VERSION: Final = 1
 ExecutionMode = Literal["thread", "process"]
 SyncMode = Literal["blocking", "async"]
 Origin = Literal["base", "analysis"]
+SequencingMode = Literal["off", "safe", "always"]
 LogLevel = Literal["debug", "info", "warning", "error"]
 Priority = Literal["next", "end"]
 Timing = Literal["relative", "absolute"]
@@ -31,6 +32,7 @@ Timing = Literal["relative", "absolute"]
 EXECUTION_MODES: Final[tuple[str, ...]] = get_args(ExecutionMode)
 SYNC_MODES: Final[tuple[str, ...]] = get_args(SyncMode)
 ORIGINS: Final[tuple[str, ...]] = get_args(Origin)
+SEQUENCING_MODES: Final[tuple[str, ...]] = get_args(SequencingMode)
 LOG_LEVELS: Final[tuple[str, ...]] = get_args(LogLevel)
 
 RecordValue = float | int | str | bool | None

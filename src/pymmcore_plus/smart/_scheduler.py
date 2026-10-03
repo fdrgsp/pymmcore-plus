@@ -32,7 +32,12 @@ import useq
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence
 
-    from pymmcore_plus.smart._api import Origin, Priority, SyncMode
+    from pymmcore_plus.smart._api import (
+        Origin,
+        Priority,
+        SequencingMode,
+        SyncMode,
+    )
 
 SMART_METADATA_KEY: Final = "pymmcore_plus_smart"
 """Key under ``MDAEvent.metadata`` where each event's provenance is recorded."""
@@ -77,6 +82,11 @@ class _Grid:
 QueueItem = useq.MDAEvent | _Grid
 
 
+def event_count(event: useq.MDAEvent) -> int:
+    """Number of acquisitions *event* stands for (a burst holds several)."""
+    return len(getattr(event, "events", ()) or (event,))
+
+
 def provenance(event: useq.MDAEvent) -> dict[str, Any]:
     """The smart-run provenance recorded on *event* (empty if none)."""
     value = event.metadata.get(SMART_METADATA_KEY)
@@ -100,6 +110,9 @@ class SmartEventIterator:
         on_base_complete: Callable[[], bool] | None = None,
         expand_grid: Callable[[useq.MDASequence], list[useq.MDAEvent]] | None = None,
         on_grid_error: Callable[[str], bool] | None = None,
+        sequencing: SequencingMode = "safe",
+        combine: Callable[[list[useq.MDAEvent]], list[useq.MDAEvent]] | None = None,
+        max_burst: int = 100,
     ) -> None:
         self._base: Iterator[useq.MDAEvent] = iter(base)
         self._runner = runner
@@ -119,6 +132,14 @@ class SmartEventIterator:
         # on_grid_error then decides: True skips the grid, False stops the run.
         self._expand_grid = expand_grid
         self._on_grid_error = on_grid_error
+        # Hardware sequencing: `combine` groups consecutive events into bursts
+        # (SequencedEvents). See `_gather_queue` / `_gather_base` for what may
+        # be grouped, and `sequencing` for what the user allowed.
+        self._sequencing = sequencing
+        self._combine = combine if sequencing != "off" else None
+        self._max_burst = max(1, max_burst)
+        # Events (each possibly a burst) prepared and waiting to be handed out.
+        self._ready: deque[useq.MDAEvent] = deque()
 
         self._cond = threading.Condition()
         self._base_head: useq.MDAEvent | None = None
@@ -205,8 +226,11 @@ class SmartEventIterator:
         return len(tagged)
 
     def drop_base(self) -> None:
-        """Discard all remaining base events."""
+        """Discard all remaining base events, including any already prepared."""
         with self._cond:
+            self._ready = deque(
+                e for e in self._ready if provenance(e).get("origin") != "base"
+            )
             self._base_head = None
             self._base_exhausted = True
             self._cond.notify_all()
@@ -218,6 +242,7 @@ class SmartEventIterator:
                 self._stop_reason = reason
             self._injected_next.clear()
             self._injected_end.clear()
+            self._ready.clear()
             self._cond.notify_all()
 
     # ------------------------------------------------------------- iterator
@@ -237,14 +262,17 @@ class SmartEventIterator:
                     self._stop_reason = StopReason.MAX_EVENTS
                     raise StopIteration
 
+                if self._ready:
+                    return self._pop_ready()
+
                 if self._sync == "blocking" and self._pending:
                     self._check_timeout()
                     self._cond.wait(self._poll_s)
                     continue
 
                 if self._injected_next:
-                    if (event := self._take(self._injected_next)) is not None:
-                        return self._hand_out(event)
+                    if self._gather_queue(self._injected_next):
+                        return self._pop_ready()
                     continue
 
                 if self._base_head is None and not self._base_exhausted:
@@ -260,13 +288,14 @@ class SmartEventIterator:
                     )
                     if remaining <= self._lead_time_s:
                         self._base_head = None
-                        return self._hand_out(_tag(head, "base"))
+                        self._gather_base(head)
+                        return self._pop_ready()
                     self._cond.wait(min(remaining - self._lead_time_s, self._poll_s))
                     continue
 
                 if self._injected_end:
-                    if (event := self._take(self._injected_end)) is not None:
-                        return self._hand_out(event)
+                    if self._gather_queue(self._injected_end):
+                        return self._pop_ready()
                     continue
 
                 if self._pending:
@@ -289,35 +318,101 @@ class SmartEventIterator:
                 self._stop_reason = StopReason.COMPLETED
                 raise StopIteration
 
-    def _take(self, queue: deque[QueueItem]) -> useq.MDAEvent | None:
-        """Pop the next event of *queue*, expanding a grid first if needed.
+    def _gather_queue(self, queue: deque[QueueItem]) -> bool:
+        """Prepare the next requested event(s) from *queue*; return whether any.
 
-        Returns None when a grid could not be expanded (skipped or stopping):
-        the caller re-evaluates the queues.
+        Consecutive events of the *same response* are grouped into a burst: the
+        script asked for them as one unit, so nothing is meant to be decided
+        between them. Grouping never crosses a response boundary, nor a grid
+        (whose size depends on the state reached just before it runs).
         """
         item = queue.popleft()
-        if not isinstance(item, _Grid):
-            return item
+        if isinstance(item, _Grid):
+            events = self._expanded(item, queue)
+            if events is None:
+                return False
+        else:
+            events = [item]
+            response = provenance(item).get("response_id")
+            while (
+                self._combine is not None
+                and len(events) < self._max_burst
+                and queue
+                and isinstance(nxt := queue[0], useq.MDAEvent)
+                and provenance(nxt).get("response_id") == response
+            ):
+                queue.popleft()
+                events.append(nxt)
+        self._prepare(events)
+        return bool(self._ready)
+
+    def _expanded(
+        self, grid: _Grid, queue: deque[QueueItem]
+    ) -> list[useq.MDAEvent] | None:
+        """Size *grid* now and return its events, or None if it cannot run."""
         try:
             if self._expand_grid is None:
                 raise ValueError("No grid expander: cannot size this grid.")
-            events = self._expand_grid(item.sequence)
+            events = self._expand_grid(grid.sequence)
         except ValueError as e:
             skip = self._on_grid_error is not None and self._on_grid_error(str(e))
             if not skip:
                 self._stop_reason = StopReason.ERROR
                 self._injected_next.clear()
                 self._injected_end.clear()
+                self._ready.clear()
             return None
-        tagged = [_tag_with(e, item.provenance) for e in events]
+        tagged = [_tag_with(e, grid.provenance) for e in events]
         if not tagged:  # an empty grid: nothing to acquire
             return None
-        # The rest go in the grid's place, keeping the response's order.
-        queue.extendleft(reversed(tagged[1:]))
-        return tagged[0]
+        if len(tagged) > self._max_burst:
+            # The overflow stays in the grid's place, in order.
+            queue.extendleft(reversed(tagged[self._max_burst :]))
+            tagged = tagged[: self._max_burst]
+        return tagged
 
-    def _hand_out(self, event: useq.MDAEvent) -> useq.MDAEvent:
-        self._yielded += 1
+    def _gather_base(self, head: useq.MDAEvent) -> None:
+        """Prepare *head*, with the base events that may run in the same burst.
+
+        Only events that are already due are taken, so a timed series keeps its
+        timing (while a 0-interval one runs as one burst). In blocking mode
+        base events are grouped only with ``sequencing="always"``: each frame's
+        analysis is otherwise meant to gate the next acquisition, which
+        pre-triggering the camera would defeat.
+        """
+        events = [_tag(head, "base")]
+        may_group = self._combine is not None and (
+            self._sync == "async" or self._sequencing == "always"
+        )
+        while may_group and len(events) < self._max_burst:
+            nxt = next(self._base, None)
+            if nxt is None:
+                self._base_exhausted = True
+                break
+            due = nxt.min_start_time
+            if (
+                due is not None
+                and due - self._runner.event_seconds_elapsed() > self._lead_time_s
+            ):
+                self._base_head = nxt  # not due yet: it starts the next batch
+                break
+            events.append(_tag(nxt, "base"))
+        self._prepare(events)
+
+    def _prepare(self, events: list[useq.MDAEvent]) -> None:
+        """Rebase timing, group into bursts where allowed, and queue to hand out."""
+        rebased = [self._rebased(e) for e in events]
+        if self._combine is not None and len(rebased) > 1:
+            rebased = self._combine(rebased)
+        self._ready.extend(rebased)
+
+    def _pop_ready(self) -> useq.MDAEvent:
+        event = self._ready.popleft()
+        self._yielded += event_count(event)
+        return event
+
+    def _rebased(self, event: useq.MDAEvent) -> useq.MDAEvent:
+        """Shift an analysis event onto the run clock, if it asked for that."""
         info = provenance(event)
         if info.get("origin") == "analysis" and info.get("relative"):
             return self._rebase(event, info["response_id"])

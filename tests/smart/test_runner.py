@@ -603,3 +603,127 @@ def test_smart_package_imports_without_qt() -> None:
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
     assert out.stdout.strip() == ""
+
+
+def _burst_counter(core: CMMCorePlus) -> list[str]:
+    """Record the type of every event the engine starts, on either backend.
+
+    Connected directly: with Qt signals a plain callable would be queued to
+    the thread it was connected from, which runs no event loop here.
+    """
+    from pymmcore_plus.smart._runner import _connect_direct
+
+    started: list[str] = []
+    events = core.mda.events
+    _connect_direct(
+        events, events.eventStarted, lambda e: started.append(type(e).__name__)
+    )
+    return started
+
+
+FAST_BASE = useq.MDASequence(
+    channels=["DAPI"], time_plan=useq.TIntervalLoops(interval=0, loops=20)
+)
+NOOP = "API_VERSION = 1\ndef analyze(image, frame, ctx): ...\n"
+
+
+@pytest.mark.parametrize(
+    ("sequencing", "sync", "bursts"),
+    [
+        ("safe", "async", True),  # a 0-interval base runs as one burst
+        ("safe", "blocking", False),  # per-frame feedback is preserved
+        ("always", "blocking", True),  # opted in explicitly
+        ("off", "async", False),
+    ],
+)
+def test_base_sequencing_modes(
+    core: CMMCorePlus, tmp_path: Path, sequencing: str, sync: str, bursts: bool
+) -> None:
+    core.mda.engine.use_hardware_sequencing = True
+    started = _burst_counter(core)
+    script = _script(tmp_path, NOOP)
+    summary = _run(core, FAST_BASE, script, sequencing=sequencing, sync=sync)
+    assert summary["status"] == "completed"
+    assert summary["frames"] == 20  # every frame arrives, either way
+    assert ("SequencedEvent" in started) is bursts
+    if bursts:
+        assert len(started) < 20
+
+
+def test_returned_batch_is_sequenced_in_blocking_mode(
+    core: CMMCorePlus, tmp_path: Path
+) -> None:
+    """The script committed to the whole batch: nothing gates inside it."""
+    core.mda.engine.use_hardware_sequencing = True
+    started = _burst_counter(core)
+    script = _script(
+        tmp_path,
+        """
+        import useq
+        API_VERSION = 1
+        SYNC = "blocking"
+
+        def analyze(image, frame, ctx):
+            if frame.frame_id == 0:
+                return useq.MDASequence(
+                    time_plan=useq.TIntervalLoops(interval=0, loops=8)
+                )
+        """,
+    )
+    summary = _run(core, ONE, script, tmp_path / "run")
+    assert summary["status"] == "completed"
+    assert summary["frames"] == 9
+    assert "SequencedEvent" in started
+    frames = _lines(tmp_path / "run" / "frames.jsonl")
+    # provenance survives sequencing: every burst frame is attributed
+    assert [f["origin"] for f in frames] == ["base"] + ["analysis"] * 8
+    assert {f["parent_frame_id"] for f in frames[1:]} == {0}
+
+
+def test_reactive_script_does_not_deadlock_with_sequencing(
+    core: CMMCorePlus, tmp_path: Path
+) -> None:
+    """Each event depends on the previous frame: nothing may be pre-fetched."""
+    core.mda.engine.use_hardware_sequencing = True
+    script = _script(
+        tmp_path,
+        """
+        import useq
+        from pymmcore_plus.smart import STOP
+        API_VERSION = 1
+        SYNC = "async"
+
+        def analyze(image, frame, ctx):
+            if frame.frame_id >= 4:
+                return STOP
+            return useq.MDAEvent(exposure=1)
+        """,
+    )
+    summary = _run(core, ONE, script, sequencing="always")
+    assert summary["status"] == "stopped_by_script"
+    assert summary["frames"] == 5
+
+
+def test_max_burst_bounds_preemption(core: CMMCorePlus, tmp_path: Path) -> None:
+    core.mda.engine.use_hardware_sequencing = True
+    started = _burst_counter(core)
+    script = _script(tmp_path, NOOP)
+    config = SmartRunConfig.from_script(script, sync="async", max_burst=5)
+    runner = SmartRunner(core)
+    runner.prepare(FAST_BASE, config)
+    runner.start()
+    summary = runner.wait(60)
+    assert summary is not None and summary["frames"] == 20
+    assert started.count("SequencedEvent") == 4  # 20 frames / 5 per burst
+
+
+def test_sequencing_is_read_from_the_script(tmp_path: Path) -> None:
+    from pymmcore_plus.smart import inspect_script
+
+    script = _script(tmp_path, 'API_VERSION = 1\nSEQUENCING = "off"\n' + NOOP)
+    assert inspect_script(script).sequencing == "off"
+    assert SmartRunConfig.from_script(script).sequencing == "off"
+    # an explicit argument still wins
+    assert (
+        SmartRunConfig.from_script(script, sequencing="always").sequencing == "always"
+    )

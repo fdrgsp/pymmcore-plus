@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 import useq
 from psygnal import Signal, SignalGroup
 
+from pymmcore_plus.core._sequencing import iter_sequenced_events
 from pymmcore_plus.smart._api import FrameInfo, SystemInfo, with_fov
 from pymmcore_plus.smart._executors import (
     AnalysisExecutor,
@@ -62,7 +63,12 @@ if TYPE_CHECKING:
     from pymmcore_plus import CMMCorePlus
     from pymmcore_plus.mda import SingleOutput
     from pymmcore_plus.metadata import FrameMetaV1
-    from pymmcore_plus.smart._api import ExecutionMode, Response, SyncMode
+    from pymmcore_plus.smart._api import (
+        ExecutionMode,
+        Response,
+        SequencingMode,
+        SyncMode,
+    )
     from pymmcore_plus.smart._worker import HookResult
 
 OnError = Literal["stop", "skip"]
@@ -87,6 +93,10 @@ class SmartRunConfig:
     execution: ExecutionMode
     sync: SyncMode
     filter: AnalyzeFilter
+    sequencing: SequencingMode = "safe"
+    """Which events may be hardware-sequenced into bursts (see `SmartRunner`)."""
+    max_burst: int = 100
+    """Largest burst, in events. Bounds how long an urgent request can wait."""
     on_error: OnError = "stop"
     analysis_timeout_s: float | None = None
     max_total_events: int = 10_000
@@ -101,6 +111,7 @@ class SmartRunConfig:
         params: dict[str, Any] | None = None,
         execution: ExecutionMode | None = None,
         sync: SyncMode | None = None,
+        sequencing: SequencingMode | None = None,
         filter: AnalyzeFilter | None = None,
         **options: Any,
     ) -> SmartRunConfig:
@@ -114,6 +125,7 @@ class SmartRunConfig:
             params=spec.resolve_params(params),
             execution=execution or spec.execution,
             sync=sync or spec.sync,
+            sequencing=sequencing or spec.sequencing,
             filter=filter or spec.filter,
             **options,
         )
@@ -129,6 +141,8 @@ class SmartRunConfig:
             "params": self.params,
             "execution": self.execution,
             "sync": self.sync,
+            "sequencing": self.sequencing,
+            "max_burst": self.max_burst,
             "filter": self.filter.to_dict(),
             "on_error": self.on_error,
             "analysis_timeout_s": self.analysis_timeout_s,
@@ -384,6 +398,9 @@ class SmartRunner:
             else None,
             expand_grid=self._expand_grid,
             on_grid_error=self._on_grid_error,
+            sequencing=config.sequencing,
+            combine=self._combine,
+            max_burst=config.max_burst,
         )
         if (log := self._log) is not None:
             log.open(self._run_info, config.spec.source, packages=self._packages)
@@ -532,6 +549,22 @@ class SmartRunner:
             self._stats.analyses_queued += 1
         future.add_done_callback(partial(self._on_result, frame_id))
         self.events.analysisQueued.emit(frame_id)
+
+    def _combine(self, events: list[useq.MDAEvent]) -> list[useq.MDAEvent]:
+        """Group *events* into hardware-triggered bursts where the engine can.
+
+        The runner applies the engine's own event iterator only to a plain
+        `Iterable`; a smart run must hand out events one at a time (an
+        `Iterator`), or the combiner's look-ahead would ask for the next event
+        before the current one has been acquired -- a deadlock for a reactive
+        script. So the grouping is done here instead, on events that are
+        already known, and the resulting `SequencedEvent`s are handed to the
+        engine, which recognizes them by type.
+        """
+        engine = self._mmc.mda.engine
+        if engine is None or not getattr(engine, "use_hardware_sequencing", False):
+            return events
+        return list(iter_sequenced_events(self._mmc, events))
 
     def _expand_grid(self, seq: useq.MDASequence) -> list[useq.MDAEvent]:
         """Runner thread (inside the iterator): size *seq*'s grids and expand it.

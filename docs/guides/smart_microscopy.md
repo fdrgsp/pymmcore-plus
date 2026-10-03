@@ -54,6 +54,7 @@ API_VERSION = 1  # required
 NAME = "My experiment"  # optional
 EXECUTION = "thread"  # default: "thread" | "process"
 SYNC = "blocking"  # default: "blocking" | "async"
+SEQUENCING = "safe"  # default: "safe" | "off" | "always"
 ANALYZE = {"channels": ["FITC"], "every_nth": 1, "origins": ["base"]}
 PARAMETERS = {
     "threshold": {"default": 1000.0, "min": 0, "max": 65535},
@@ -155,6 +156,35 @@ Response(
 Processes are always *spawned*, never forked. In a frozen (PyInstaller)
 application, call `multiprocessing.freeze_support()` first in the entry
 point.
+
+## Hardware sequencing
+
+Hardware sequencing pre-triggers the camera for a run of events, so they are
+acquired as fast as the hardware allows instead of one round-trip at a time.
+It needs the events up front, which is in tension with feedback: you cannot
+pre-trigger frames whose existence depends on analyzing the previous one.
+`SEQUENCING` (or `sequencing=`) decides the balance:
+
+| | Events a script returns in one response | Base events |
+|---|---|---|
+| `"off"` | one at a time | one at a time |
+| `"safe"` (default) | **one burst** | **one burst** in async; one at a time in blocking |
+| `"always"` | **one burst** | **one burst** in both modes |
+
+- A **returned batch** (a z-stack, a time-lapse) is sequenced in both modes:
+  the script committed to those events as a unit, so nothing is meant to be
+  decided between them.
+- **Base events** are sequenced in async mode, where nothing gates them. In
+  blocking mode each frame's analysis is meant to gate the next acquisition,
+  so sequencing them is opt-in (`"always"`): feedback then applies between
+  bursts rather than between frames.
+- Only events that are **already due** share a burst, so a timed series keeps
+  its timing while a 0-interval one runs flat out.
+- `max_burst` (default 100) caps a burst, which bounds how long a
+  `priority="next"` request waits. Cancelling works inside a burst.
+- Sequencing also needs the engine's own switch,
+  `core.mda.engine.use_hardware_sequencing` (on by default), and hardware
+  that supports it; otherwise events simply run one at a time.
 
 ## Blocking or async
 

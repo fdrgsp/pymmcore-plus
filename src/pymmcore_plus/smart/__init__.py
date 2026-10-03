@@ -26,6 +26,7 @@ from ._api import (
     ParamSpec,
     PixelConfig,
     Response,
+    SequencingMode,
     SyncMode,
     SystemInfo,
 )
@@ -54,6 +55,7 @@ __all__ = [
     "Response",
     "ScriptError",
     "ScriptSpec",
+    "SequencingMode",
     "SmartRunConfig",
     "SmartRunError",
     "SmartRunStats",

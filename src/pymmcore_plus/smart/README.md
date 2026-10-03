@@ -116,7 +116,20 @@ runner thread ── sequenceFinished (direct) ─▶ _finalize → finalizer th
 10. **This package must stay Qt-free.**
     `tests/smart/test_runner.py::test_smart_package_imports_without_qt`
     enforces it.
-11. **Status reporting:** a run's status comes from the runner's own flags
+11. **Hardware sequencing is done here, not by the engine.** `MDARunner.run`
+    applies `engine.event_iterator` (which groups events into
+    `SequencedEvent`s) only to a plain `Iterable`; an `Iterator` is used as
+    is. A smart run must stay an `Iterator`: the combiner looks ahead, asking
+    for event N+1 before yielding N, which deadlocks a reactive script
+    (nothing is acquired, so no frame arrives, so N+1 never comes --
+    reproduced in `test_reactive_script_does_not_deadlock_with_sequencing`).
+    So `SmartEventIterator` groups events itself, through
+    `SmartRunner._combine` -> `iter_sequenced_events`, and only over events it
+    already holds: one response's events, or base events that are already
+    due. The engine recognizes the resulting `SequencedEvent` by type, and
+    each sub-event keeps its provenance metadata, so `frames.jsonl` is
+    unaffected. `_gather_base` is where the blocking/async rule lives.
+12. **Status reporting:** a run's status comes from the runner's own flags
     first (`user_cancelled`, `iterator.stop_reason`), then from
     `core.mda.status.finish_reason`. A cancel from elsewhere can end the
     run at an event boundary without the iterator ever being asked again.

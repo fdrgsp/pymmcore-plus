@@ -351,3 +351,129 @@ def test_empty_grid_is_skipped() -> None:
     it.inject([_grid()], priority="next", parent_frame_id=0, response_id=0)
     assert list(it) == []
     assert it.stop_reason == StopReason.COMPLETED
+
+
+def _combine(events: list[useq.MDAEvent]) -> list[useq.MDAEvent]:
+    """Stand-in for hardware sequencing: one 'burst' object per group."""
+    return [_Burst(events=tuple(events))] if len(events) > 1 else list(events)
+
+
+class _Burst(useq.MDAEvent):
+    """Minimal stand-in for SequencedEvent (which also carries `events`)."""
+
+    events: tuple[useq.MDAEvent, ...] = ()
+
+
+def test_response_events_are_grouped_into_one_burst() -> None:
+    it = SmartEventIterator([_ev(0)], FakeRunner(), sync="blocking", combine=_combine)
+    it.inject(
+        [_ev(10), _ev(11), _ev(12)], priority="next", parent_frame_id=0, response_id=0
+    )
+    first = next(it)
+    assert isinstance(first, _Burst)
+    assert [e.index["t"] for e in first.events] == [10, 11, 12]
+    assert it.yielded == 3  # counted as three acquisitions, not one
+    assert [e.index["t"] for e in it] == [0]
+
+
+def test_separate_responses_are_not_grouped() -> None:
+    it = SmartEventIterator([], FakeRunner(), sync="async", combine=_combine)
+    it.inject([_ev(10)], priority="next", parent_frame_id=0, response_id=0)
+    it.inject([_ev(20)], priority="next", parent_frame_id=1, response_id=1)
+    assert [e.index["t"] for e in it] == [10, 20]
+
+
+def test_base_events_are_grouped_in_async_only() -> None:
+    base = [_ev(i) for i in range(4)]
+    grouped = next(
+        iter(SmartEventIterator(base, FakeRunner(), sync="async", combine=_combine))
+    )
+    assert isinstance(grouped, _Burst)
+    assert len(grouped.events) == 4
+
+    single = next(
+        iter(SmartEventIterator(base, FakeRunner(), sync="blocking", combine=_combine))
+    )
+    assert not isinstance(single, _Burst)
+
+    always = next(
+        iter(
+            SmartEventIterator(
+                base,
+                FakeRunner(),
+                sync="blocking",
+                combine=_combine,
+                sequencing="always",
+            )
+        )
+    )
+    assert isinstance(always, _Burst)
+
+
+def test_sequencing_off_never_groups() -> None:
+    it = SmartEventIterator(
+        [_ev(i) for i in range(4)],
+        FakeRunner(),
+        sync="async",
+        combine=_combine,
+        sequencing="off",
+    )
+    assert all(not isinstance(e, _Burst) for e in it)
+
+
+def test_base_burst_stops_at_an_event_that_is_not_due() -> None:
+    """A timed series keeps its timing; only due events share a burst."""
+    runner = FakeRunner()
+    it = SmartEventIterator(
+        [_ev(0), _ev(1), _ev(2, t=100.0), _ev(3, t=100.0)],
+        runner,
+        sync="async",
+        combine=_combine,
+        lead_time_s=0.0,
+    )
+    first = next(it)
+    assert isinstance(first, _Burst)
+    assert [e.index["t"] for e in first.events] == [0, 1]
+    runner.clock = 100.0
+    rest = next(it)
+    assert isinstance(rest, _Burst)
+    assert [e.index["t"] for e in rest.events] == [2, 3]
+
+
+def test_burst_is_capped() -> None:
+    it = SmartEventIterator(
+        [_ev(i) for i in range(10)],
+        FakeRunner(),
+        sync="async",
+        combine=_combine,
+        max_burst=4,
+    )
+    sizes = [len(e.events) if isinstance(e, _Burst) else 1 for e in it]
+    assert sizes == [4, 4, 2]
+
+
+def test_requested_event_runs_after_the_current_burst() -> None:
+    """Pre-emption latency is bounded by max_burst, not by the whole base."""
+    it = SmartEventIterator(
+        [_ev(i) for i in range(10)],
+        FakeRunner(),
+        sync="async",
+        combine=_combine,
+        max_burst=3,
+    )
+    first = next(it)
+    assert len(first.events) == 3  # type: ignore[attr-defined]
+    it.inject([_ev(99)], priority="next", parent_frame_id=0, response_id=0)
+    assert next(it).index["t"] == 99  # before the remaining base events
+
+
+def test_drop_base_discards_prepared_base_events() -> None:
+    it = SmartEventIterator(
+        [_ev(i) for i in range(6)],
+        FakeRunner(),
+        sync="async",
+        combine=None,  # no grouping: events are prepared one at a time
+    )
+    next(it)
+    it.drop_base()
+    assert list(it) == []

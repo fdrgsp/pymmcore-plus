@@ -19,9 +19,11 @@ from pymmcore_plus.smart._api import (
     API_VERSION,
     EXECUTION_MODES,
     ORIGINS,
+    SEQUENCING_MODES,
     SYNC_MODES,
     ExecutionMode,
     Origin,
+    SequencingMode,
     SyncMode,
 )
 
@@ -37,6 +39,7 @@ _KNOWN_CONSTANTS: Final = frozenset(
         "DESCRIPTION",
         "EXECUTION",
         "SYNC",
+        "SEQUENCING",
         "ANALYZE",
         "PARAMETERS",
     }
@@ -132,6 +135,7 @@ class ScriptSpec:
     description: str
     execution: ExecutionMode
     sync: SyncMode
+    sequencing: SequencingMode
     filter: AnalyzeFilter
     params: tuple[ParamDef, ...]
     has_setup: bool
@@ -201,6 +205,7 @@ def inspect_source(
     name = _str_constant(constants, "NAME") or (path.stem if path else "script")
     execution = _choice_constant(constants, "EXECUTION", EXECUTION_MODES, "thread")
     sync = _choice_constant(constants, "SYNC", SYNC_MODES, "blocking")
+    sequencing = _choice_constant(constants, "SEQUENCING", SEQUENCING_MODES, "safe")
     return ScriptSpec(
         path=path or Path("<script>"),
         source=source,
@@ -210,6 +215,7 @@ def inspect_source(
         description=_str_constant(constants, "DESCRIPTION"),
         execution=cast("ExecutionMode", execution),
         sync=cast("SyncMode", sync),
+        sequencing=cast("SequencingMode", sequencing),
         filter=_read_filter(constants),
         params=_read_params(constants),
         has_setup="setup" in hooks,
