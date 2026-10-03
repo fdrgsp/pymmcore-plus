@@ -23,7 +23,7 @@ API_VERSION: Final = 1
 
 ExecutionMode = Literal["thread", "process"]
 SyncMode = Literal["blocking", "async"]
-Origin = Literal["base", "analysis"]
+Origin = Literal["base", "analysis", "external"]
 SequencingMode = Literal["off", "safe", "always"]
 LogLevel = Literal["debug", "info", "warning", "error"]
 Priority = Literal["next", "end"]
@@ -174,9 +174,9 @@ class FrameInfo:
         The frame's metadata as recorded at acquisition time (``FrameMetaV1``):
         ``pixel_size_um``, ``position`` (x/y/z), ``exposure_ms``,
         ``camera_device``, ``runner_time_ms``, ``property_values``...
-    origin : "base" | "analysis"
-        Whether the event came from the base acquisition or was returned by a
-        previous analysis.
+    origin : "base" | "analysis" | "external"
+        Where the event came from: the base acquisition, a previous analysis,
+        or a request made from outside the script (`SmartRunner.request`).
     parent_frame_id : int | None
         For an analysis-origin frame, the frame whose analysis requested it.
     """

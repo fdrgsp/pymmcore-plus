@@ -129,7 +129,12 @@ runner thread ── sequenceFinished (direct) ─▶ _finalize → finalizer th
     due. The engine recognizes the resulting `SequencedEvent` by type, and
     each sub-event keeps its provenance metadata, so `frames.jsonl` is
     unaffected. `_gather_base` is where the blocking/async rule lives.
-12. **Status reporting:** a run's status comes from the runner's own flags
+12. **Events can also come from outside.** `SmartRunner.request()` is the
+    public way to add events to a run in progress (a console, a widget,
+    another thread). It goes through the same `normalise_response` ->
+    `_queue` -> `iterator.inject` path as a hook's response, tagged
+    `origin="external"` with no `parent_frame_id`.
+13. **Status reporting:** a run's status comes from the runner's own flags
     first (`user_cancelled`, `iterator.stop_reason`), then from
     `core.mda.status.finish_reason`. A cancel from elsewhere can end the
     run at an event boundary without the iterator ever being asked again.

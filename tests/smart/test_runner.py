@@ -727,3 +727,111 @@ def test_sequencing_is_read_from_the_script(tmp_path: Path) -> None:
     assert (
         SmartRunConfig.from_script(script, sequencing="always").sequencing == "always"
     )
+
+
+SLOW_BASE = useq.MDASequence(
+    channels=["DAPI"], time_plan=useq.TIntervalLoops(interval=0.15, loops=8)
+)
+
+
+def _started_runner(core: CMMCorePlus, tmp_path: Path, **options: Any) -> SmartRunner:
+    """A run in progress, with one frame already acquired."""
+    script = _script(tmp_path, NOOP)
+    runner = SmartRunner(core)
+    seen = threading.Event()
+    runner.events.frameAcquired.connect(lambda _r: seen.set())
+    runner.prepare(
+        SLOW_BASE,
+        SmartRunConfig.from_script(script, **options),
+        output="memory",
+        run_dir=tmp_path / "run",
+    )
+    runner.start()
+    assert seen.wait(20)
+    return runner
+
+
+def test_request_adds_events_from_outside(core: CMMCorePlus, tmp_path: Path) -> None:
+    runner = _started_runner(core, tmp_path, sync="async")
+    n = runner.request(useq.MDAEvent(channel={"config": "FITC", "group": "Channel"}))
+    assert n == 1
+    summary = runner.wait(60)
+    assert summary is not None and summary["status"] == "completed"
+    frames = _lines(tmp_path / "run" / "frames.jsonl")
+    external = [f for f in frames if f["origin"] == "external"]
+    assert len(external) == 1
+    assert external[0]["event"]["channel"]["config"] == "FITC"
+    assert external[0]["parent_frame_id"] is None
+    # and it is recorded in the run log
+    requests = [
+        a for a in _lines(tmp_path / "run" / "analysis.jsonl") if a["call"] == "request"
+    ]
+    assert len(requests) == 1 and requests[0]["injected"] == 1
+
+
+def test_request_accepts_sequences_and_priority(
+    core: CMMCorePlus, tmp_path: Path
+) -> None:
+    runner = _started_runner(core, tmp_path, sync="async")
+    n = runner.request(
+        useq.MDASequence(z_plan=useq.ZRangeAround(range=2, step=1)), priority="end"
+    )
+    assert n == 3
+    summary = runner.wait(60)
+    assert summary is not None
+    frames = _lines(tmp_path / "run" / "frames.jsonl")
+    # priority="end": after every base event
+    assert [f["origin"] for f in frames] == ["base"] * 8 + ["external"] * 3
+
+
+def test_request_can_stop_and_drop_base(core: CMMCorePlus, tmp_path: Path) -> None:
+    runner = _started_runner(core, tmp_path, sync="async")
+    runner.request(useq.MDAEvent(), drop_base=True)
+    summary = runner.wait(60)
+    assert summary is not None
+    assert summary["frames"] < 8  # the rest of the base was dropped
+    assert summary["status"] == "completed"
+
+
+def test_request_outside_a_run_is_refused(core: CMMCorePlus, tmp_path: Path) -> None:
+    runner = SmartRunner(core)
+    with pytest.raises(SmartRunError, match="No smart run is in progress"):
+        runner.request(useq.MDAEvent())
+
+
+def test_request_validates_its_input(core: CMMCorePlus, tmp_path: Path) -> None:
+    runner = _started_runner(core, tmp_path, sync="async")
+    try:
+        with pytest.raises(TypeError):
+            runner.request(42)
+    finally:
+        runner.cancel()
+        runner.wait(30)
+
+
+def test_external_frames_can_be_excluded_from_analysis(
+    core: CMMCorePlus, tmp_path: Path
+) -> None:
+    script = _script(
+        tmp_path,
+        'API_VERSION = 1\nSYNC = "async"\nANALYZE = {"origins": ["base"]}\n'
+        "def analyze(image, frame, ctx):\n    ctx.record(origin=frame.origin)\n",
+    )
+    runner = SmartRunner(core)
+    seen = threading.Event()
+    runner.events.frameAcquired.connect(lambda _r: seen.set())
+    runner.prepare(
+        SLOW_BASE,
+        SmartRunConfig.from_script(script),
+        output="memory",
+        run_dir=tmp_path / "run",
+    )
+    runner.start()
+    assert seen.wait(20)
+    runner.request(useq.MDAEvent())
+    summary = runner.wait(60)
+    assert summary is not None
+    analysed = [
+        a for a in _lines(tmp_path / "run" / "analysis.jsonl") if a["call"] == "analyze"
+    ]
+    assert {a["records"]["origin"] for a in analysed} == {"base"}

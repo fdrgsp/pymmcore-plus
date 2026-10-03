@@ -190,9 +190,10 @@ class SmartEventIterator:
         events: Sequence[useq.MDAEvent | useq.MDASequence],
         *,
         priority: Priority,
-        parent_frame_id: int,
+        parent_frame_id: int | None,
         response_id: int,
         relative_timing: bool = True,
+        origin: Origin = "analysis",
     ) -> int:
         """Queue analysis-requested items; return how many were accepted.
 
@@ -205,7 +206,7 @@ class SmartEventIterator:
         (dropping them) once stopped.
         """
         info = {
-            "origin": "analysis",
+            "origin": origin,
             "parent_frame_id": parent_frame_id,
             "response_id": response_id,
             "relative": relative_timing,
@@ -412,9 +413,9 @@ class SmartEventIterator:
         return event
 
     def _rebased(self, event: useq.MDAEvent) -> useq.MDAEvent:
-        """Shift an analysis event onto the run clock, if it asked for that."""
+        """Shift a requested event onto the run clock, if it asked for that."""
         info = provenance(event)
-        if info.get("origin") == "analysis" and info.get("relative"):
+        if info.get("relative"):
             return self._rebase(event, info["response_id"])
         return event
 

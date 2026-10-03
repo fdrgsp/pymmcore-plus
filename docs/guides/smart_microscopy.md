@@ -93,7 +93,7 @@ def teardown(ctx: AnalysisContext) -> None:  # optional: always called
 | `frame.frame_id` | 0-based acquisition order. It is also the frame's index along the data's `t` axis. |
 | `frame.event` | The `useq.MDAEvent` that produced it. |
 | `frame.metadata` | Recorded state: `position`, `pixel_size_um`, `exposure_ms`, `camera_device`, `runner_time_ms`... |
-| `frame.origin` / `frame.parent_frame_id` | `"base"` or `"analysis"`, and which frame's analysis requested it. |
+| `frame.origin` / `frame.parent_frame_id` | `"base"`, `"analysis"` or `"external"` (see below), and which frame's analysis requested it. |
 | `ctx.params` | Resolved `PARAMETERS` (read-only). |
 | `ctx.state` | A dict that persists for the run. |
 | `ctx.system` | A [`SystemInfo`][pymmcore_plus.smart.SystemInfo] snapshot of the microscope at the start: image size, pixel sizes per pixel configuration... |
@@ -156,6 +156,25 @@ Response(
 Processes are always *spawned*, never forked. In a frozen (PyInstaller)
 application, call `multiprocessing.freeze_support()` first in the entry
 point.
+
+## Steering a run from outside the script
+
+`SmartRunner.request()` adds events to a run in progress -- the same thing an
+`analyze` hook does by returning them, but callable from a console, a button,
+or another thread. It is thread-safe.
+
+```python
+runner = core.run_smart(survey, "my_script.py")
+...
+runner.request(useq.MDAEvent(channel="FITC"))  # acquire next
+runner.request(z_stack_sequence, priority="end")  # after the base events
+runner.request(drop_base=True, stop=True)  # or just steer the run
+```
+
+Such frames are recorded with `origin="external"` (and no
+`parent_frame_id`), so they are easy to tell apart afterwards, and a script
+can ignore them with `ANALYZE = {"origins": ["base", "analysis"]}`. Each
+request is written to `analysis.jsonl` as a ``"request"`` entry.
 
 ## Hardware sequencing
 

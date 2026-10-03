@@ -32,7 +32,12 @@ import useq
 from psygnal import Signal, SignalGroup
 
 from pymmcore_plus.core._sequencing import iter_sequenced_events
-from pymmcore_plus.smart._api import FrameInfo, SystemInfo, with_fov
+from pymmcore_plus.smart._api import (
+    FrameInfo,
+    SystemInfo,
+    normalise_response,
+    with_fov,
+)
 from pymmcore_plus.smart._executors import (
     AnalysisExecutor,
     ExecutorStartError,
@@ -65,9 +70,12 @@ if TYPE_CHECKING:
     from pymmcore_plus.metadata import FrameMetaV1
     from pymmcore_plus.smart._api import (
         ExecutionMode,
+        Origin,
+        Priority,
         Response,
         SequencingMode,
         SyncMode,
+        Timing,
     )
     from pymmcore_plus.smart._worker import HookResult
 
@@ -424,6 +432,82 @@ class SmartRunner:
         self._done.wait(timeout)
         return self._summary
 
+    def request(
+        self,
+        events: object = (),
+        *,
+        priority: Priority = "next",
+        timing: Timing = "relative",
+        drop_base: bool = False,
+        stop: bool = False,
+    ) -> int:
+        """Add events to the running acquisition from outside the script.
+
+        The same thing an ``analyze`` hook does by returning events, but
+        callable from anywhere -- a console, a button, another thread -- while
+        a run is in progress. Thread-safe.
+
+        Parameters
+        ----------
+        events : MDAEvent | MDASequence | iterable of those | Response
+            What to acquire, as a hook would return it. A grid without a field
+            of view is sized when it runs, as usual.
+        priority : "next" | "end"
+            Acquire before the remaining base events, or after them.
+        timing : "relative" | "absolute"
+            "relative" counts each ``min_start_time`` from now.
+        drop_base : bool
+            Also discard the remaining base events.
+        stop : bool
+            Also finish the run after the event currently being acquired.
+
+        Returns
+        -------
+        int
+            How many events were queued (0 if the run is already stopping).
+
+        Raises
+        ------
+        SmartRunError
+            If no run is in progress.
+        ValueError, TypeError
+            If *events* is not something a hook could have returned.
+        """
+        iterator = self._iterator
+        if iterator is None or not self._acquiring:
+            raise SmartRunError("No smart run is in progress.")
+        limit = self._config.max_events_per_response if self._config else 1000
+        response = normalise_response(events, max_events=limit)
+        response = replace(
+            response,
+            priority=priority,
+            timing=timing,
+            drop_base=drop_base or response.drop_base,
+            stop=stop or response.stop,
+        )
+        injected, dropped = self._queue(
+            response,
+            iterator,
+            parent_frame_id=None,
+            who="An external request",
+            origin="external",
+        )
+        self._record(
+            {
+                "frame_id": None,
+                "call": "request",
+                "ok": True,
+                "duration_ms": 0.0,
+                "records": {},
+                "logs": [],
+                "response": response_summary(response),
+                "injected": injected,
+                "dropped": dropped,
+                "error": None,
+            }
+        )
+        return injected
+
     def request_stop(self) -> None:
         """Finish after the event currently running; nothing more is queued."""
         if (iterator := self._iterator) is not None and self._acquiring:
@@ -647,9 +731,23 @@ class SmartRunner:
     def _apply(
         self, result: HookResult, iterator: SmartEventIterator
     ) -> tuple[int, bool]:
-        """Act on a successful response; return (events injected, dropped?)."""
-        response = result.response
-        assert response is not None
+        """Act on a hook's successful response; return (events injected, dropped?)."""
+        assert result.response is not None
+        who = "after_base()" if result.frame_id is None else f"Frame {result.frame_id}"
+        return self._queue(
+            result.response, iterator, parent_frame_id=result.frame_id, who=who
+        )
+
+    def _queue(
+        self,
+        response: Response,
+        iterator: SmartEventIterator,
+        *,
+        parent_frame_id: int | None,
+        who: str,
+        origin: Origin = "analysis",
+    ) -> tuple[int, bool]:
+        """Act on *response*; return (events injected, dropped?)."""
         if response.drop_base:
             iterator.drop_base()
         injected = 0
@@ -658,19 +756,15 @@ class SmartRunner:
             injected = iterator.inject(
                 list(response.events),
                 priority=response.priority,
-                parent_frame_id=result.frame_id if result.frame_id is not None else -1,
+                parent_frame_id=parent_frame_id,
                 response_id=next(self._response_ids),
                 relative_timing=response.timing == "relative",
+                origin=origin,
             )
             dropped = injected == 0
         if response.stop:
             iterator.stop(StopReason.SCRIPT)
-            who = (
-                "after_base()"
-                if result.frame_id is None
-                else f"Frame {result.frame_id}"
-            )
-            self.events.logMessage.emit("info", f"{who}: the script stopped the run.")
+            self.events.logMessage.emit("info", f"{who}: stopped the run.")
         with self._lock:
             self._stats.injected += injected
             self._stats.dropped += int(dropped)
@@ -724,12 +818,16 @@ class SmartRunner:
             "dropped": dropped,
             "error": result.error,
         }
-        if (log := self._log) is not None:
-            log.write_analysis(record)
         if result.call == "analyze":
             with self._lock:
                 self._stats.analyses_done += 1
-        for level, message in result.logs:
+        self._record(record)
+
+    def _record(self, record: dict[str, Any]) -> None:
+        """Write one entry to ``analysis.jsonl`` and report it."""
+        if (log := self._log) is not None:
+            log.write_analysis(record)
+        for level, message in record.get("logs") or ():
             self.events.logMessage.emit(level, message)
         self.events.analysisFinished.emit(record)
 
