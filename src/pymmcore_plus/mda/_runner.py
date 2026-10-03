@@ -648,7 +648,12 @@ class MDARunner:
                     self._state = RunState.WAITING
         else:
             with self._lock:
-                self._finish_reason = FinishReason.COMPLETED
+                # A cancel that arrived while the event iterator was producing
+                # the next event (e.g. an event-driven iterator blocked waiting
+                # for analysis) has already set CANCELED; the iterator ending
+                # afterwards must not overwrite it.
+                if self._finish_reason is None:
+                    self._finish_reason = FinishReason.COMPLETED
 
     def _iter_exec_output(self, iterable: Iterable) -> Iterator[PImagePayload | int]:
         """Iterate over exec_event output, sending cancel/pause signals to generators.

@@ -13,6 +13,8 @@ import useq
 from pymmcore_plus.mda._runner import FinishReason, RunState
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from pymmcore_plus import CMMCorePlus
 
 
@@ -182,6 +184,30 @@ def test_cancel_from_waiting(core: CMMCorePlus) -> None:
         time_plan=useq.TIntervalLoops(interval=0.2, loops=3),
     )
     runner.run(seq)
+
+    cancel_mock.assert_called_once()
+    assert runner.status.finish_reason == FinishReason.CANCELED
+
+
+def test_cancel_while_event_iterator_blocks(core: CMMCorePlus) -> None:
+    """Cancel while a user iterator is producing the next event stays CANCELED.
+
+    Event-driven acquisitions pass an iterator that may block in ``__next__``
+    (e.g. waiting for analysis of the previous frame). A cancel arriving then
+    finds the runner WAITING and moves it straight to FINISHING; the iterator
+    then ends, which must not overwrite the reason with COMPLETED.
+    """
+    runner = core.mda
+    cancel_mock = Mock()
+    runner.events.sequenceCanceled.connect(cancel_mock)
+
+    def _events() -> Iterator[useq.MDAEvent]:
+        yield useq.MDAEvent()
+        assert runner.status.phase == RunState.WAITING
+        runner.cancel()
+        assert runner.status.phase == RunState.FINISHING
+
+    runner.run(_events())
 
     cancel_mock.assert_called_once()
     assert runner.status.finish_reason == FinishReason.CANCELED
