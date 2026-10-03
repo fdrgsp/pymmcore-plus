@@ -1,5 +1,4 @@
 # do NOT use __future__.annotations here. It breaks typer.
-import contextlib
 import os
 import shutil
 import subprocess
@@ -161,8 +160,9 @@ def mmstudio() -> None:  # pragma: no cover
         print("[magenta]run `mmcore install` to install a version of Micro-Manager")
         raise typer.Exit(1)
     cmd = ["open", "-a", str(app)] if PLATFORM == "Darwin" else [str(app)]
-    with contextlib.chdir(mm):
-        raise typer.Exit(subprocess.run(cmd).returncode)
+    # cwd= rather than contextlib.chdir, which needs Python 3.11 (requires-python
+    # is >=3.10).
+    raise typer.Exit(subprocess.run(cmd, cwd=mm).returncode)
 
 
 @app.command()

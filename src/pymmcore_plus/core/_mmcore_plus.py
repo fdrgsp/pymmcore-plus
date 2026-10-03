@@ -50,10 +50,11 @@ from .events import CMMCoreSignaler, PCoreSignaler, _get_auto_core_callback_clas
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence
-    from typing import Literal, Never, TypeAlias, TypedDict, Unpack
+    from typing import Literal, TypeAlias, TypedDict
 
     import numpy as np
     from pymmcore import DeviceLabel
+    from typing_extensions import Never, Unpack  # py311
     from useq import MDAEvent, MDASequence
 
     from pymmcore_plus.mda._runner import DimensionOverride, SingleOutput
