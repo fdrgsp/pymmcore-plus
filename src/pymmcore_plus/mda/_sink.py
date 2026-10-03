@@ -50,6 +50,9 @@ class OmeWritersSink(SinkProtocol):
         self._dimension_overrides = dimension_overrides or {}
         self._stream: OMEStream | None = None
         self._summary_meta: SummaryMetaV1 | None = None
+        # True when frames are stored along a single unbounded axis, which
+        # loses each frame's channel/position/z: the event is stored instead.
+        self._store_events = False
 
     @property
     def settings(self) -> AcquisitionSettings:
@@ -67,6 +70,17 @@ class OmeWritersSink(SinkProtocol):
     def summary_meta(self) -> SummaryMetaV1 | None:
         """The `SummaryMetaV1` passed to `setup()`, or `None` before that."""
         return self._summary_meta
+
+    @property
+    def stores_events(self) -> bool:
+        """Whether each frame's `MDAEvent` is stored in its per-frame metadata.
+
+        True for runs stored along a single unbounded axis (iterator-driven
+        runs, or sequences that could not be mapped to a fixed shape): their
+        axes cannot say which channel, z or position a frame belongs to.
+        Known after `setup()`.
+        """
+        return self._store_events
 
     @property
     def stream(self) -> OMEStream | None:
@@ -110,8 +124,10 @@ class OmeWritersSink(SinkProtocol):
         pixel_size_um = info["pixel_size_um"]
 
         useq_settings: Mapping
+        self._store_events = False
         if isinstance(sequence, GeneratorMDASequence):
             useq_settings = _unbounded_3d_settings(width, height, pixel_size_um)
+            self._store_events = True
         else:
             try:
                 useq_settings = useq_to_acquisition_settings(
@@ -127,6 +143,7 @@ class OmeWritersSink(SinkProtocol):
                     e,
                 )
                 useq_settings = _unbounded_3d_settings(width, height, pixel_size_um)
+                self._store_events = True
 
         # Apply dimension overrides (chunk_size, shard_size_chunks) to all paths
         if overrides := self._dimension_overrides:
@@ -164,7 +181,10 @@ class OmeWritersSink(SinkProtocol):
         self._set_summary_metadata()
 
     def append(self, img: np.ndarray, event: MDAEvent, meta: FrameMetaV1) -> None:
-        self._stream.append(img, frame_metadata=frame_meta_to_ome(meta))  # type: ignore[union-attr]
+        self._stream.append(  # type: ignore[union-attr]
+            img,
+            frame_metadata=frame_meta_to_ome(meta, include_event=self._store_events),
+        )
 
     def skip(self, *, frames: int = 1) -> None:
         self._stream.skip(frames=frames)  # type: ignore[union-attr]
@@ -225,7 +245,7 @@ def _unbounded_3d_settings(
     }
 
 
-def frame_meta_to_ome(meta: FrameMetaV1) -> dict:
+def frame_meta_to_ome(meta: FrameMetaV1, *, include_event: bool = False) -> dict:
     """Convert `FrameMetaV1` to the `frame_metadata` dict `OMEStream.append` expects.
 
     This is the exact mapping `OmeWritersSink` uses for a live, disk-backed
@@ -233,6 +253,11 @@ def frame_meta_to_ome(meta: FrameMetaV1) -> dict:
     *new* stream (e.g. exporting an in-memory/"scratch" run to disk) can
     reproduce the same per-frame metadata instead of re-deriving the key
     names itself.
+
+    With *include_event*, the frame's full `useq.MDAEvent` is added under
+    ``"mda_event"``, as a JSON string (`useq.MDAEvent.model_validate_json`
+    restores it): needed when the store's axes cannot identify the frame (see
+    `OmeWritersSink.stores_events`).
     """
     # TODO:
     # decide whether we should be passing *everything* else from FrameMetaV1
@@ -243,6 +268,14 @@ def frame_meta_to_ome(meta: FrameMetaV1) -> dict:
     }
     if pos := meta.get("position"):
         d.update({f"position_{k}": v for k, v in pos.items() if k in "xyz"})
+    if include_event and (event := meta.get("mda_event")) is not None:
+        # The full event (channel, z, position name, index, metadata...), for
+        # stores whose axes cannot say which event produced a frame -- those
+        # of iterator-driven (event-driven/smart) runs, stored along one
+        # unbounded axis. Regular stores encode this in their axes already.
+        # A JSON *string*: OME-TIFF stores extra frame metadata in an OME
+        # `Map`, whose values must be strings (a nested dict fails the write).
+        d["mda_event"] = event.model_dump_json(exclude={"sequence"}, exclude_none=True)
     return d
 
 

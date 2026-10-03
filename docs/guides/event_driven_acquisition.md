@@ -320,3 +320,10 @@ queue:
 for event in my_sequence:
     q.put(event)
 ```
+
+!!! tip "Smart Microscopy"
+
+    For a ready-made workflow built on this mechanism -- analysis scripts run
+    in a thread or process, blocking or asynchronous feedback, two-phase
+    survey/target experiments and full run records -- see the
+    [Smart Microscopy](./smart_microscopy.md) guide.

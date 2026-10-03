@@ -240,4 +240,5 @@ extend-ignore-identifiers-re = [
     "anager",
     "ba",
     "(?:FOVs?)",
+    "writeable",  # numpy: ndarray.flags.writeable
 ]

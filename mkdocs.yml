@@ -21,6 +21,7 @@ nav:
           - guides/mda_engine.md
           - guides/custom_engine.md
           - guides/event_driven_acquisition.md
+          - guides/smart_microscopy.md
           - guides/logging.md
           - guides/unicore.md
           - guides/ipython_completion.md
@@ -34,6 +35,7 @@ nav:
       - API:
           - api/cmmcoreplus.md
           - api/mda.md
+          - api/smart.md
           - api/events.md
           - api/device.md
           - api/configuration.md
