@@ -28,9 +28,10 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal
 
+import useq
 from psygnal import Signal, SignalGroup
 
-from pymmcore_plus.smart._api import FrameInfo, SystemInfo
+from pymmcore_plus.smart._api import FrameInfo, SystemInfo, with_fov
 from pymmcore_plus.smart._executors import (
     AnalysisExecutor,
     ExecutorStartError,
@@ -56,7 +57,6 @@ if TYPE_CHECKING:
     from concurrent.futures import Future
 
     import numpy as np
-    import useq
     from typing_extensions import Self
 
     from pymmcore_plus import CMMCorePlus
@@ -172,11 +172,12 @@ class SmartSignaler(SignalGroup):
 def response_summary(response: Response | None) -> dict[str, Any] | None:
     if response is None:
         return None
+    items = tuple(response.events) if isinstance(response.events, tuple) else ()
     return {
-        # normalise_response always leaves a tuple of events
-        "n_events": len(response.events)
-        if isinstance(response.events, tuple)
-        else None,
+        # normalise_response leaves a tuple of events, and of sequences whose
+        # grids are sized only when they run (counted separately)
+        "n_events": sum(isinstance(i, useq.MDAEvent) for i in items),
+        "grids": sum(isinstance(i, useq.MDASequence) for i in items),
         "priority": response.priority,
         "timing": response.timing,
         "stop": response.stop,
@@ -224,6 +225,7 @@ class SmartRunner:
         self._acquiring = False
         self._finalizing = False
         self._user_cancelled = False
+        self._calibrated = True
         self._connected = False
         self._done = threading.Event()
         self._done.set()
@@ -367,6 +369,7 @@ class SmartRunner:
         self._response_ids = itertools.count()
         self._stats = SmartRunStats()
         self._user_cancelled = False
+        self._calibrated = True
         self._summary = None
         self._done.clear()
         self._iterator = SmartEventIterator(
@@ -379,6 +382,8 @@ class SmartRunner:
             on_base_complete=self._on_base_complete
             if config.spec.has_after_base
             else None,
+            expand_grid=self._expand_grid,
+            on_grid_error=self._on_grid_error,
         )
         if (log := self._log) is not None:
             log.open(self._run_info, config.spec.source, packages=self._packages)
@@ -490,18 +495,20 @@ class SmartRunner:
         }
         if (log := self._log) is not None:
             log.write_frame(record)
+        calibrated = bool(meta.get("pixel_size_um"))
         with self._lock:
             self._stats.frames += 1
-            first_uncalibrated = not meta.get(
-                "pixel_size_um"
-            ) and not self._stats.extra.get("warned_pixel_size")
-            if first_uncalibrated:
-                self._stats.extra["warned_pixel_size"] = True
-        if first_uncalibrated:
+            # Warn each time the state *becomes* uncalibrated (e.g. a switch to
+            # an objective with no pixel configuration), not on every frame.
+            became_uncalibrated = self._calibrated and not calibrated
+            self._calibrated = calibrated
+        if became_uncalibrated:
             self.events.logMessage.emit(
                 "warning",
-                f"Frame {frame_id} has no calibrated pixel size: positions computed "
-                "from it in pixels cannot be converted to the stage.",
+                f"Frame {frame_id} has no calibrated pixel size (no pixel "
+                "configuration matches the current state): its pixel size is "
+                "recorded as 0, and positions in pixels cannot be converted to "
+                "the stage.",
             )
         self.events.frameAcquired.emit(record)
 
@@ -525,6 +532,45 @@ class SmartRunner:
             self._stats.analyses_queued += 1
         future.add_done_callback(partial(self._on_result, frame_id))
         self.events.analysisQueued.emit(frame_id)
+
+    def _expand_grid(self, seq: useq.MDASequence) -> list[useq.MDAEvent]:
+        """Runner thread (inside the iterator): size *seq*'s grids and expand it.
+
+        Called when the grid is next to run, right after the previous event
+        executed: the core is idle and in exactly the state the grid will be
+        acquired in -- whatever objective was switched to before, by this
+        response, an earlier one, or a base event.
+        """
+        core = self._mmc
+        px = core.getPixelSizeUm()
+        if px <= 0:
+            current = core.getCurrentPixelSizeConfig() or "none matches"
+            raise ValueError(
+                "A requested grid has no field of view, and the pixel size where "
+                f"it would run is not calibrated (pixel configuration: {current}),"
+                " so its tiles cannot be placed. Calibrate the pixel size of that "
+                "objective, or set fov_width/fov_height on the grid plan."
+            )
+        events = list(
+            with_fov(seq, core.getImageWidth() * px, core.getImageHeight() * px)
+        )
+        limit = self._config.max_events_per_response if self._config else None
+        if limit is not None and len(events) > limit:
+            raise ValueError(
+                f"A requested grid expands to {len(events)} events, more than the "
+                f"{limit} allowed per response."
+            )
+        return events
+
+    def _on_grid_error(self, message: str) -> bool:
+        """Runner thread: a grid could not be sized. True skips it, False stops."""
+        with self._lock:
+            self._stats.errors += 1
+        if self._config is not None and self._config.on_error == "skip":
+            self.events.logMessage.emit("error", f"{message} The grid was skipped.")
+            return True
+        self.events.analysisError.emit(message, False)
+        return False
 
     def _on_base_complete(self) -> bool:
         """Runner thread (inside the iterator): submit ``after_base``."""
@@ -577,7 +623,7 @@ class SmartRunner:
         dropped = False
         if response.events:
             injected = iterator.inject(
-                list(response.events),  # type: ignore[arg-type]
+                list(response.events),
                 priority=response.priority,
                 parent_frame_id=result.frame_id if result.frame_id is not None else -1,
                 response_id=next(self._response_ids),
@@ -839,15 +885,11 @@ def dry_run(
 
 
 def _blank_frame() -> FrameInfo:
-    import useq
-
     return FrameInfo(frame_id=0, event=useq.MDAEvent(), metadata={})
 
 
 def _frame_from_core(core: CMMCorePlus) -> FrameInfo:
     """What a frame acquired in *core*'s current state would report."""
-    import useq
-
     channel: dict[str, str] | None = None
     try:
         if (group := core.getChannelGroup()) and (

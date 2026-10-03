@@ -24,12 +24,13 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Protocol
+
+import useq
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence
-
-    import useq
 
     from pymmcore_plus.smart._api import Origin, Priority, SyncMode
 
@@ -65,6 +66,17 @@ class StopReason:
     RUNNER: Final = "runner_finishing"  # cancelled from outside
 
 
+@dataclass(frozen=True)
+class _Grid:
+    """A requested sequence whose grid is sized only when it is about to run."""
+
+    sequence: useq.MDASequence
+    provenance: dict[str, Any]
+
+
+QueueItem = useq.MDAEvent | _Grid
+
+
 def provenance(event: useq.MDAEvent) -> dict[str, Any]:
     """The smart-run provenance recorded on *event* (empty if none)."""
     value = event.metadata.get(SMART_METADATA_KEY)
@@ -86,6 +98,8 @@ class SmartEventIterator:
         analysis_timeout_s: float | None = None,
         on_analysis_timeout: Callable[[int], None] | None = None,
         on_base_complete: Callable[[], bool] | None = None,
+        expand_grid: Callable[[useq.MDASequence], list[useq.MDAEvent]] | None = None,
+        on_grid_error: Callable[[str], bool] | None = None,
     ) -> None:
         self._base: Iterator[useq.MDAEvent] = iter(base)
         self._runner = runner
@@ -99,12 +113,18 @@ class SmartEventIterator:
         # pending; returns whether it submitted work (the after_base hook).
         self._on_base_complete = on_base_complete
         self._base_complete_called = False
+        # Sizes a requested grid with the pixel size in effect right now (the
+        # runner thread calls __next__ only after the previous event ran), and
+        # expands it. Raises ValueError when that pixel size is unknown;
+        # on_grid_error then decides: True skips the grid, False stops the run.
+        self._expand_grid = expand_grid
+        self._on_grid_error = on_grid_error
 
         self._cond = threading.Condition()
         self._base_head: useq.MDAEvent | None = None
         self._base_exhausted = False
-        self._injected_next: deque[useq.MDAEvent] = deque()
-        self._injected_end: deque[useq.MDAEvent] = deque()
+        self._injected_next: deque[QueueItem] = deque()
+        self._injected_end: deque[QueueItem] = deque()
         # frame_id -> time.monotonic() at submission
         self._pending: dict[int, float] = {}
         self._yielded = 0
@@ -146,28 +166,31 @@ class SmartEventIterator:
 
     def inject(
         self,
-        events: Sequence[useq.MDAEvent],
+        events: Sequence[useq.MDAEvent | useq.MDASequence],
         *,
         priority: Priority,
         parent_frame_id: int,
         response_id: int,
         relative_timing: bool = True,
     ) -> int:
-        """Queue analysis-requested *events*; return how many were accepted.
+        """Queue analysis-requested items; return how many were accepted.
 
-        With *relative_timing*, each event's ``min_start_time`` counts from the
-        moment its response starts executing (see `_rebase`), so a returned
-        time-lapse starts its own clock. Otherwise times are taken as given,
-        on the run's event clock. Returns 0 (dropping them) once stopped.
+        Items are events, or sequences whose grids still need a field of view:
+        those are sized and expanded when they reach the front of the queue
+        (see `expand_grid`). With *relative_timing*, each event's
+        ``min_start_time`` counts from the moment its response starts executing
+        (see `_rebase`), so a returned time-lapse starts its own clock.
+        Otherwise times are taken as given, on the run's event clock. Returns 0
+        (dropping them) once stopped.
         """
-        tagged = [
-            _tag(
-                e,
-                "analysis",
-                parent_frame_id=parent_frame_id,
-                response_id=response_id,
-                relative=relative_timing,
-            )
+        info = {
+            "origin": "analysis",
+            "parent_frame_id": parent_frame_id,
+            "response_id": response_id,
+            "relative": relative_timing,
+        }
+        tagged: list[QueueItem] = [
+            _Grid(e, info) if isinstance(e, useq.MDASequence) else _tag_with(e, info)
             for e in events
         ]
         with self._cond:
@@ -220,7 +243,9 @@ class SmartEventIterator:
                     continue
 
                 if self._injected_next:
-                    return self._hand_out(self._injected_next.popleft())
+                    if (event := self._take(self._injected_next)) is not None:
+                        return self._hand_out(event)
+                    continue
 
                 if self._base_head is None and not self._base_exhausted:
                     self._base_head = next(self._base, None)
@@ -240,7 +265,9 @@ class SmartEventIterator:
                     continue
 
                 if self._injected_end:
-                    return self._hand_out(self._injected_end.popleft())
+                    if (event := self._take(self._injected_end)) is not None:
+                        return self._hand_out(event)
+                    continue
 
                 if self._pending:
                     # Nothing to do now, but a pending analysis may still
@@ -261,6 +288,33 @@ class SmartEventIterator:
 
                 self._stop_reason = StopReason.COMPLETED
                 raise StopIteration
+
+    def _take(self, queue: deque[QueueItem]) -> useq.MDAEvent | None:
+        """Pop the next event of *queue*, expanding a grid first if needed.
+
+        Returns None when a grid could not be expanded (skipped or stopping):
+        the caller re-evaluates the queues.
+        """
+        item = queue.popleft()
+        if not isinstance(item, _Grid):
+            return item
+        try:
+            if self._expand_grid is None:
+                raise ValueError("No grid expander: cannot size this grid.")
+            events = self._expand_grid(item.sequence)
+        except ValueError as e:
+            skip = self._on_grid_error is not None and self._on_grid_error(str(e))
+            if not skip:
+                self._stop_reason = StopReason.ERROR
+                self._injected_next.clear()
+                self._injected_end.clear()
+            return None
+        tagged = [_tag_with(e, item.provenance) for e in events]
+        if not tagged:  # an empty grid: nothing to acquire
+            return None
+        # The rest go in the grid's place, keeping the response's order.
+        queue.extendleft(reversed(tagged[1:]))
+        return tagged[0]
 
     def _hand_out(self, event: useq.MDAEvent) -> useq.MDAEvent:
         self._yielded += 1
@@ -310,6 +364,10 @@ class SmartEventIterator:
 
 def _tag(event: useq.MDAEvent, origin: Origin, **extra: Any) -> useq.MDAEvent:
     """Return a copy of *event* recording where it came from."""
+    return _tag_with(event, {"origin": origin, **extra})
+
+
+def _tag_with(event: useq.MDAEvent, info: dict[str, Any]) -> useq.MDAEvent:
     metadata = dict(event.metadata)
-    metadata[SMART_METADATA_KEY] = {"origin": origin, **extra}
+    metadata[SMART_METADATA_KEY] = dict(info)
     return event.model_copy(update={"metadata": metadata})

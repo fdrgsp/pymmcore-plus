@@ -128,12 +128,15 @@ Response(
   applies its `properties`, but acquires nothing.
 - **Grids need a field of view.** useq places grid tiles by
   `fov_width`/`fov_height`, and without them tiles end up 1 µm apart. A
-  returned grid without a field of view gets one from the pixel size *in
-  effect where it runs*: the start state, updated by the `properties` of
-  the events before it in the same response (such as an objective switch).
-  If that pixel size is not calibrated, the response is refused. A switch
-  into an uncalibrated state without a grid only produces a warning. A
-  response is assumed to start from the run-start state.
+  returned grid without those is sized by the runner **when it is about to
+  run**, from the pixel size in effect at that moment -- so an objective
+  switched earlier counts, whether by this response, an earlier one, or a
+  base event. If that pixel size is not calibrated, the run stops with an
+  explanation (or the grid is skipped, with `on_error="skip"`). A switch
+  into an uncalibrated state that no grid needs only logs a warning.
+  `ctx.system` holds every pixel configuration and its pixel size, for
+  scripts that would rather size a grid themselves
+  (`ctx.system.fov_um("Res40x")`).
 - An event's `channel` is a different type from the `useq.Channel` a
   sequence takes. Rebuild it with `useq.Channel(config=c.config,
   group=c.group)`.

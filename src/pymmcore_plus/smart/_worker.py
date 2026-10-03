@@ -172,14 +172,9 @@ class _ScriptHost:
             if hook is not None:
                 value = hook(*args)
                 if call in ("analyze", "after_base"):
-                    normalised = normalise_response(
-                        value,
-                        max_events=self._config.max_events_per_response,
-                        system=self.ctx.system,
+                    response = normalise_response(
+                        value, max_events=self._config.max_events_per_response
                     )
-                    response = normalised.response
-                    for warning in normalised.warnings:
-                        self.ctx.log(warning, "warning")
         except BaseException as e:
             if isinstance(e, (KeyboardInterrupt, SystemExit)):
                 raise

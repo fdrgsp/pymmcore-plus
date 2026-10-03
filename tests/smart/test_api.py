@@ -7,7 +7,7 @@ import pytest
 import useq
 
 from pymmcore_plus.smart import STOP, AnalysisContext, PixelConfig, Response, SystemInfo
-from pymmcore_plus.smart._api import normalise_response
+from pymmcore_plus.smart._api import needs_fov, normalise_response, with_fov
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -51,20 +51,20 @@ def _subgrid(**grid: float) -> useq.MDASequence:
 
 
 def test_none_means_no_action() -> None:
-    assert normalise_response(None).response == Response(events=())
+    assert normalise_response(None) == Response(events=())
 
 
 def test_single_event_and_iterables_become_tuples() -> None:
     event = useq.MDAEvent(exposure=5)
-    assert normalise_response(event).response.events == (event,)
-    assert normalise_response([event, event]).response.events == (event, event)
-    assert normalise_response(e for e in [event]).response.events == (event,)
+    assert normalise_response(event).events == (event,)
+    assert normalise_response([event, event]).events == (event, event)
+    assert normalise_response(e for e in [event]).events == (event,)
 
 
 def test_sequences_are_expanded_in_order() -> None:
     seq = useq.MDASequence(z_plan=useq.ZRangeAround(range=2, step=1))
     first, last = useq.MDAEvent(exposure=1), useq.MDAEvent(exposure=2)
-    events = normalise_response([first, seq, last]).response.events
+    events = normalise_response([first, seq, last]).events
     assert isinstance(events, tuple)
     assert len(events) == 5
     assert events[0] is first and events[-1] is last
@@ -74,10 +74,10 @@ def test_response_options_are_kept() -> None:
     event = useq.MDAEvent()
     out = normalise_response(
         Response(events=[event], priority="end", timing="absolute", drop_base=True)
-    ).response
+    )
     assert out.events == (event,)
     assert (out.priority, out.timing, out.drop_base) == ("end", "absolute", True)
-    assert normalise_response(STOP).response.stop
+    assert normalise_response(STOP).stop
 
 
 @pytest.mark.parametrize("bad", [42, "events", {"a": 1}, [useq.MDAEvent(), 3]])
@@ -119,48 +119,44 @@ def test_context_log_and_record(tmp_path: Path) -> None:
     assert type(records["count"]) is int
 
 
-# ---------------------------------------------------------------- grids / FOV
+# ----------------------------------------------------------- grids / FOV
 
 
-def test_grid_fov_filled_from_start_state() -> None:
-    events = normalise_response(_subgrid(), system=SYSTEM).response.events
-    # 512 px x 1.0 um/px -> tiles 512 um apart, centered on x=1000
-    assert [e.x_pos for e in events] == [744.0, 1256.0]
-
-
-def test_grid_fov_follows_objective_switch_in_response() -> None:
-    out = normalise_response(
-        [_switch("40X"), _subgrid(), _switch("10X")], system=SYSTEM
+def test_grid_without_fov_is_kept_unexpanded() -> None:
+    """It can only be sized when it runs, with the pixel size in effect then."""
+    grid = _subgrid()
+    assert needs_fov(grid)
+    assert normalise_response(grid).events == (grid,)
+    event = useq.MDAEvent()
+    assert normalise_response([_switch("40X"), grid, event]).events == (
+        _switch("40X"),
+        grid,
+        event,
     )
-    xs = [e.x_pos for e in out.response.events]
-    # 512 px x 0.25 um/px -> tiles 128 um apart
-    assert xs == [None, 936.0, 1064.0, None]
-    assert out.warnings == []
 
 
-def test_explicit_grid_fov_is_kept() -> None:
-    events = normalise_response(
-        _subgrid(fov_width=100, fov_height=100), system=SYSTEM
-    ).response.events
+def test_grid_with_fov_is_expanded_immediately() -> None:
+    sized = _subgrid(fov_width=100, fov_height=100)
+    assert not needs_fov(sized)
+    events = normalise_response(sized).events
     assert [e.x_pos for e in events] == [950.0, 1050.0]
 
 
-@pytest.mark.parametrize("label", ["Uncal", "NotAConfig"])
-def test_grid_refused_without_calibrated_pixel_size(label: str) -> None:
-    with pytest.raises(ValueError, match="not calibrated"):
-        normalise_response([_switch(label), _subgrid()], system=SYSTEM)
+def test_with_fov_sizes_nested_grids() -> None:
+    events = list(with_fov(_subgrid(), 512.0, 256.0))
+    # 512 um tiles, centered on x=1000
+    assert [e.x_pos for e in events] == [744.0, 1256.0]
+    # the original is untouched
+    assert needs_fov(_subgrid())
 
 
-def test_grid_refused_without_system_information() -> None:
-    with pytest.raises(ValueError, match="not calibrated"):
-        normalise_response(_subgrid())
-
-
-def test_switch_to_uncalibrated_state_only_warns() -> None:
-    out = normalise_response([_switch("Uncal"), useq.MDAEvent()], system=SYSTEM)
-    assert len(out.response.events) == 2
-    assert len(out.warnings) == 1
-    assert "no calibrated pixel size" in out.warnings[0]
+def test_with_fov_keeps_explicit_values() -> None:
+    seq = useq.MDASequence(
+        grid_plan=useq.GridRowsColumns(rows=1, columns=2, fov_width=10)
+    )
+    sized = with_fov(seq, 512.0, 256.0)
+    assert sized.grid_plan is not None
+    assert (sized.grid_plan.fov_width, sized.grid_plan.fov_height) == (10.0, 256.0)
 
 
 def test_system_info_helpers() -> None:

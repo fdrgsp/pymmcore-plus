@@ -279,8 +279,9 @@ class Response:
     ----------
     events : sequence of MDAEvent / MDASequence, or an MDASequence
         What to acquire, in order. Sequences are expanded into their events;
-        a grid plan without a field of view gets one from the pixel size in
-        effect at that point (see `normalise_response`).
+        a grid plan without a field of view gets one when it is about to run,
+        from the pixel size in effect at that moment (so an objective switched
+        earlier -- in this response or any previous one -- is accounted for).
     priority : "next" | "end"
         Acquire them before any remaining base events ("next"), or after them.
     timing : "relative" | "absolute"
@@ -325,38 +326,25 @@ class ParamSpec(TypedDict, total=False):
     tooltip: str
 
 
-@dataclass
-class Normalised:
-    """`normalise_response` output: the response, plus warnings to report."""
-
-    response: Response
-    warnings: list[str] = field(default_factory=list)
+Item = useq.MDAEvent | useq.MDASequence
+"""A normalised response item: an event, or a grid still to be sized."""
 
 
-def normalise_response(
-    value: object,
-    *,
-    max_events: int = 1000,
-    system: SystemInfo | None = None,
-) -> Normalised:
-    """Turn whatever a hook returned into a `Response` with a flat tuple of events.
+def normalise_response(value: object, *, max_events: int = 1000) -> Response:
+    """Turn whatever a hook returned into a `Response` with a flat tuple of items.
 
     Accepts None, an `MDAEvent`, an `MDASequence`, an iterable mixing both, or
-    a `Response`. Sequences are expanded in order. Raises ``TypeError`` for
-    anything else and ``ValueError`` when more than *max_events* events would
-    be produced, or when a grid cannot be sized (see below).
+    a `Response`. Sequences are expanded into their events, in order -- except
+    those with a grid lacking a field of view, which are kept as they are:
+    their tiles can only be placed with the pixel size in effect *when they
+    run* (see `needs_fov`), which the runner knows only then.
 
-    **Grids.** useq places grid tiles using the grid's ``fov_width`` /
-    ``fov_height``; without them, tiles end up 1 µm apart. The engine fills
-    these in only for the base sequence, so here a grid without a field of
-    view gets one from *system*: the pixel size in effect at that point of the
-    response (the start state, updated by the ``properties`` of the events
-    before it -- e.g. an objective switch) times the image size. If that pixel
-    size is unknown, the response is refused. An event that switches to a
-    state with no calibrated pixel size only produces a warning.
+    Raises ``TypeError`` for anything else and ``ValueError`` when more than
+    *max_events* events would be produced (grids still to be sized are counted
+    when they are expanded, against the run's total).
     """
     if value is None:
-        return Normalised(Response())
+        return Response()
     if isinstance(value, Response):
         response = value
     elif isinstance(value, (useq.MDAEvent, useq.MDASequence)):
@@ -374,41 +362,28 @@ def normalise_response(
     if not isinstance(items, Iterable):
         raise TypeError(f"Response.events must be iterable, not {type(items)}")
 
-    warnings: list[str] = []
-    events = tuple(
-        islice(_expand(items, system or SystemInfo(), warnings), max_events + 1)
-    )
-    if len(events) > max_events:
+    expanded = tuple(islice(_expand(items), max_events + 1))
+    n_events = sum(isinstance(item, useq.MDAEvent) for item in expanded)
+    if len(expanded) > max_events or n_events > max_events:
         raise ValueError(f"more than {max_events} events requested in one response")
-    return Normalised(
-        Response(
-            events=events,
-            priority=response.priority,
-            timing=response.timing,
-            stop=response.stop,
-            drop_base=response.drop_base,
-        ),
-        warnings,
+    return Response(
+        events=expanded,
+        priority=response.priority,
+        timing=response.timing,
+        stop=response.stop,
+        drop_base=response.drop_base,
     )
 
 
-def _expand(
-    items: Iterable[object], system: SystemInfo, warnings: list[str]
-) -> Iterator[useq.MDAEvent]:
-    state: dict[tuple[str, str], str] | None = None  # None: start state
+def _expand(items: Iterable[object]) -> Iterator[Item]:
     for item in items:
         if isinstance(item, useq.MDAEvent):
-            if item.properties:
-                state = system.state_after(item.properties, state)
-                if system.pixel_configs and system.pixel_size_for(state) <= 0:
-                    warnings.append(
-                        "An event switches to a state with no calibrated pixel size "
-                        f"({_describe(item.properties)}): pixel sizes recorded "
-                        "with its frames will be 0."
-                    )
             yield item
         elif isinstance(item, useq.MDASequence):
-            yield from _with_fov(item, system, state)
+            if needs_fov(item):
+                yield item  # sized and expanded when it runs
+            else:
+                yield from item
         else:
             raise TypeError(
                 f"expected MDAEvent or MDASequence items, got "
@@ -416,28 +391,23 @@ def _expand(
             )
 
 
-def _with_fov(
-    seq: useq.MDASequence,
-    system: SystemInfo,
-    state: PropertyState | None,
-) -> Iterator[useq.MDAEvent]:
-    """Expand *seq*, filling in missing grid fields of view from *system*."""
+def needs_fov(seq: useq.MDASequence) -> bool:
+    """Whether *seq* has a grid (its own, or a position's) without a field of view.
+
+    useq places grid tiles using ``fov_width``/``fov_height``; without them the
+    tiles end up 1 µm apart. The engine fills these in for the base sequence
+    only, so the smart runner sizes such grids itself, when they are about to
+    run (see `with_fov`).
+    """
     sequences = [seq, *(p.sequence for p in _positions(seq) if p.sequence)]
-    if not any(_grid_needs_fov(s.grid_plan) for s in sequences):
-        yield from seq
-        return
-    px = system.pixel_size_for(state)
-    if px <= 0 or not system.image_width:
-        where = (
-            "at the start of the run" if state is None else "after the events before it"
-        )
-        raise ValueError(
-            "A returned grid has no field of view, and the pixel size "
-            f"{where} is not calibrated, so the tiles cannot be placed. Set "
-            "fov_width/fov_height on the grid plan, or calibrate the pixel size "
-            "of that objective."
-        )
-    fov = {"fov_width": system.image_width * px, "fov_height": system.image_height * px}
+    return any(_grid_needs_fov(s.grid_plan) for s in sequences)
+
+
+def with_fov(
+    seq: useq.MDASequence, fov_width: float, fov_height: float
+) -> useq.MDASequence:
+    """A copy of *seq* whose grids without a field of view get this one (µm)."""
+    fov = {"fov_width": fov_width, "fov_height": fov_height}
 
     def _fill(s: useq.MDASequence) -> useq.MDASequence:
         update: dict[str, Any] = {}
@@ -454,7 +424,7 @@ def _with_fov(
             )
         return s.model_copy(update=update) if update else s
 
-    yield from _fill(seq)
+    return _fill(seq)
 
 
 def _positions(seq: useq.MDASequence) -> tuple[useq.Position, ...]:
@@ -471,7 +441,3 @@ def _grid_needs_fov(grid: object) -> bool:
         getattr(grid, "fov_width", None) is None
         or getattr(grid, "fov_height", None) is None
     )
-
-
-def _describe(properties: Iterable[Sequence[Any]]) -> str:
-    return ", ".join(f"{d}-{p}={v}" for d, p, v in properties)

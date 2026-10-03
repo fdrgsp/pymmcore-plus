@@ -244,6 +244,109 @@ def test_target_grid_at_uncalibrated_objective_is_refused(
     assert errors and "not calibrated" in errors[0]
 
 
+def test_grid_sized_after_a_switch_in_an_earlier_response(
+    core: CMMCorePlus, tmp_path: Path
+) -> None:
+    """The objective is switched by one response; the grid comes in a later one.
+
+    The grid must be sized with the pixel size in effect when it runs (0.25),
+    not the one at the start of the run (1.0).
+    """
+    core.setProperty("Objective", "Label", SURVEY)
+    script = _script(
+        tmp_path,
+        f"""
+        import useq
+        API_VERSION = 1
+        SYNC = "blocking"
+
+        def analyze(image, frame, ctx):
+            if frame.frame_id == 0:  # switch, and stay there
+                return useq.MDAEvent(
+                    properties=[("Objective", "Label", {ZOOM!r})]
+                )
+            if frame.frame_id == 1:  # a grid, in a *later* response
+                return useq.MDASequence(
+                    stage_positions=(useq.Position(x=0, y=0),),
+                    grid_plan=useq.GridRowsColumns(rows=1, columns=2),
+                )
+        """,
+    )
+    summary = _run(core, ONE, script, tmp_path / "run")
+    assert summary["status"] == "completed"
+    frames = _lines(tmp_path / "run" / "frames.jsonl")
+    tiles = [f for f in frames if f["parent_frame_id"] == 1]
+    assert len(tiles) == 2
+    assert [f["pixel_size_um"] for f in tiles] == [0.25, 0.25]
+    # 512 px x 0.25 um/px = 128 um apart, not 512 (the survey objective's)
+    xs = sorted(f["event"]["x_pos"] for f in tiles)
+    assert xs[1] - xs[0] == pytest.approx(128.0)
+
+
+def test_grid_at_uncalibrated_objective_stops_the_run(
+    core: CMMCorePlus, tmp_path: Path
+) -> None:
+    script = _script(
+        tmp_path,
+        """
+        import useq
+        API_VERSION = 1
+        SYNC = "blocking"
+
+        def analyze(image, frame, ctx):
+            if frame.frame_id == 0:
+                return [
+                    useq.MDAEvent(
+                        action=useq.CustomAction(name="uncalibrated"),
+                        properties=[("Objective", "Label", "Objective-2")],
+                    ),
+                    useq.MDASequence(
+                        stage_positions=(useq.Position(x=0, y=0),),
+                        grid_plan=useq.GridRowsColumns(rows=1, columns=2),
+                    ),
+                ]
+        """,
+    )
+    errors: list[str] = []
+    runner = SmartRunner(core)
+    runner.events.analysisError.connect(lambda msg, _f: errors.append(msg))
+    summary = runner.run(ONE, script, output="memory", timeout=60)
+    assert summary is not None
+    assert summary["status"] == "error"
+    assert errors and "not calibrated" in errors[0]
+    assert "Objective-2" not in errors[0]  # names the pixel config, not the value
+
+
+def test_uncalibrated_state_warns_once_per_transition(
+    core: CMMCorePlus, tmp_path: Path
+) -> None:
+    core.setProperty("Objective", "Label", SURVEY)
+    script = _script(
+        tmp_path,
+        """
+        import useq
+        API_VERSION = 1
+        SYNC = "blocking"
+
+        def analyze(image, frame, ctx):
+            if frame.frame_id == 0:
+                return [
+                    useq.MDAEvent(properties=[("Objective", "Label", "Objective-2")]),
+                    useq.MDAEvent(),  # still uncalibrated: no second warning
+                ]
+        """,
+    )
+    warnings: list[str] = []
+    runner = SmartRunner(core)
+    runner.events.logMessage.connect(
+        lambda level, msg: warnings.append(msg) if level == "warning" else None
+    )
+    summary = runner.run(ONE, script, output="memory", timeout=60)
+    assert summary is not None and summary["status"] == "completed"
+    assert len(warnings) == 1
+    assert "no calibrated pixel size" in warnings[0]
+
+
 def test_frame_handler_runs_on_runner_thread(core: CMMCorePlus, tmp_path: Path) -> None:
     threads: list[threading.Thread] = []
 

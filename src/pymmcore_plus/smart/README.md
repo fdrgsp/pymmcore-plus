@@ -96,12 +96,18 @@ runner thread ── sequenceFinished (direct) ─▶ _finalize → finalizer th
    This keeps thread and process modes identical and keeps hardware access
    on the runner thread. What scripts need to know about the hardware goes
    in `SystemInfo`, which must stay picklable.
-8. **Grids need a field of view.** useq places tiles 1 µm apart without
-   `fov_width`/`fov_height`, and the engine fills these in only for the
-   base sequence. `normalise_response` fills them from `SystemInfo`,
-   following the `properties` of earlier events in the response (such as
-   an objective switch). It refuses the response when the pixel size there
-   is not calibrated.
+8. **Grids are sized when they run, not when they are returned.** useq
+   places tiles 1 µm apart without `fov_width`/`fov_height`, and the engine
+   fills these in only for the base sequence. Which objective is in place
+   when a requested grid runs cannot be predicted at normalisation time:
+   `priority="next"` reorders responses, base events keep running in async
+   mode, and a preset may switch the objective. So `normalise_response`
+   leaves such a sequence unexpanded (`needs_fov`), the iterator keeps it in
+   its queue as a `_Grid`, and `_take` expands it through
+   `SmartRunner._expand_grid` when it reaches the front -- the runner thread
+   asks for the next event only after the previous one has executed, so the
+   core is idle and in exactly the state the grid will see. An uncalibrated
+   pixel size there goes through `on_grid_error` (stop, or skip).
 9. **Processes are spawned, never forked**, and are terminated through
    their `multiprocessing` handles from `ProcessPoolExecutor._processes`
    (private, but there is no public API). A worker that hangs while loading

@@ -260,3 +260,94 @@ def test_after_base_waits_for_pending_analyses() -> None:
     thread.join(1)
     assert out == [StopIteration]
     assert calls == [1]
+
+
+def _grid() -> useq.MDASequence:
+    """A sequence whose grid has no field of view (sized when it runs)."""
+    return useq.MDASequence(
+        stage_positions=(
+            useq.Position(
+                x=0,
+                y=0,
+                sequence=useq.MDASequence(
+                    grid_plan=useq.GridRowsColumns(rows=1, columns=2)
+                ),
+            ),
+        )
+    )
+
+
+def test_grid_is_expanded_when_it_reaches_the_front() -> None:
+    """Not when injected: the pixel size may change before it runs."""
+    sizes: list[float] = []
+
+    px = [1.0]
+
+    def _expand(_seq: useq.MDASequence) -> list[useq.MDAEvent]:
+        sizes.append(px[0])
+        return [_ev(100), _ev(101)]
+
+    it = SmartEventIterator(
+        [_ev(0), _ev(1)], FakeRunner(), sync="async", expand_grid=_expand
+    )
+    assert next(it).index["t"] == 0
+    it.inject([_grid()], priority="next", parent_frame_id=0, response_id=0)
+    px[0] = 0.25  # an objective switch happens before the grid runs
+    assert _labels([next(it), next(it)]) == [("analysis", 100), ("analysis", 101)]
+    assert sizes == [0.25]  # expanded with the *current* pixel size
+    assert _labels(list(it)) == [("base", 1)]
+
+
+def test_grid_keeps_its_place_in_the_queue() -> None:
+    it = SmartEventIterator(
+        [],
+        FakeRunner(),
+        sync="async",
+        expand_grid=lambda _s: [_ev(10), _ev(11)],
+    )
+    it.inject(
+        [_ev(1), _grid(), _ev(2)], priority="next", parent_frame_id=0, response_id=0
+    )
+    assert [e.index["t"] for e in it] == [1, 10, 11, 2]
+
+
+def test_unsizable_grid_stops_the_run_by_default() -> None:
+    def _boom(_seq: useq.MDASequence) -> list[useq.MDAEvent]:
+        raise ValueError("pixel size not calibrated")
+
+    errors: list[str] = []
+    it = SmartEventIterator(
+        [_ev(0)],
+        FakeRunner(),
+        sync="async",
+        expand_grid=_boom,
+        on_grid_error=lambda msg: errors.append(msg) or False,  # type: ignore[func-returns-value]
+    )
+    it.inject([_grid(), _ev(5)], priority="next", parent_frame_id=0, response_id=0)
+    assert list(it) == []
+    assert it.stop_reason == StopReason.ERROR
+    assert errors == ["pixel size not calibrated"]
+
+
+def test_unsizable_grid_can_be_skipped() -> None:
+    def _boom(_seq: useq.MDASequence) -> list[useq.MDAEvent]:
+        raise ValueError("pixel size not calibrated")
+
+    it = SmartEventIterator(
+        [_ev(0)],
+        FakeRunner(),
+        sync="async",
+        expand_grid=_boom,
+        on_grid_error=lambda _msg: True,
+    )
+    it.inject([_grid(), _ev(5)], priority="next", parent_frame_id=0, response_id=0)
+    # the grid is dropped; everything else still runs
+    assert _labels(list(it)) == [("analysis", 5), ("base", 0)]
+    assert it.stop_reason == StopReason.COMPLETED
+
+
+def test_empty_grid_is_skipped() -> None:
+    it = SmartEventIterator([], FakeRunner(), sync="async", expand_grid=lambda _s: [])
+    it.inject([_grid()], priority="next", parent_frame_id=0, response_id=0)
+    assert list(it) == []
+    assert it.stop_reason == StopReason.COMPLETED
