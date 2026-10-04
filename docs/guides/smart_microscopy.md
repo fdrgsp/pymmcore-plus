@@ -38,6 +38,41 @@ repository's
 [`examples/smart_microscopy`](https://github.com/pymmcore-plus/pymmcore-plus/tree/main/examples/smart_microscopy)
 folder.
 
+## Everything in one file
+
+The script does not have to be a separate file. Pass ``__file__`` and keep
+the run itself under an ``if __name__ == "__main__":`` guard: the worker
+loads the module under its own name (a spawned process imports it as
+``__mp_main__``), so the guarded part never runs there -- only the hooks are
+picked up.
+
+```python
+import useq
+from pymmcore_plus import CMMCorePlus
+from pymmcore_plus.smart import STOP
+
+API_VERSION = 1
+
+
+def analyze(image, frame, ctx):
+    ctx.record(mean=float(image.mean()))
+    return STOP if frame.frame_id >= 9 else useq.MDAEvent()
+
+
+if __name__ == "__main__":
+    core = CMMCorePlus()
+    core.loadSystemConfiguration()
+    runner = core.run_smart(
+        useq.MDASequence(channels=["DAPI"]), __file__, output="memory"
+    )
+    print(runner.wait())
+```
+
+A complete version is in
+[`examples/smart_microscopy/single_file.py`](https://github.com/pymmcore-plus/pymmcore-plus/tree/main/examples/smart_microscopy/single_file.py).
+Without the guard the worker would re-run the acquisition as it loads the
+module, so keep it even in thread mode.
+
 ## Writing a script
 
 A script is a single Python file. Its settings are read **without running

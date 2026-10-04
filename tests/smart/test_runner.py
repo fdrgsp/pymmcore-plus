@@ -835,3 +835,30 @@ def test_external_frames_can_be_excluded_from_analysis(
         a for a in _lines(tmp_path / "run" / "analysis.jsonl") if a["call"] == "analyze"
     ]
     assert {a["records"]["origin"] for a in analysed} == {"base"}
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_script_can_be_the_file_that_runs_it(tmp_path: Path, mode: str) -> None:
+    """One file holding both the hooks and the run (guarded by __main__)."""
+    import subprocess
+    import sys
+
+    script = tmp_path / "single.py"
+    script.write_text(
+        "import useq\n"
+        "from pymmcore_plus import CMMCorePlus\n"
+        "from pymmcore_plus.smart import STOP\n"
+        "API_VERSION = 1\n"
+        "def analyze(image, frame, ctx):\n"
+        "    return STOP if frame.frame_id >= 2 else useq.MDAEvent()\n"
+        "if __name__ == '__main__':\n"
+        "    core = CMMCorePlus()\n"
+        "    core.loadSystemConfiguration()\n"
+        "    r = core.run_smart(useq.MDASequence(channels=['DAPI']), __file__,\n"
+        f"                      execution={mode!r}, output='memory', block=True)\n"
+        "    print('FRAMES', r.summary['frames'])\n"
+    )
+    out = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=180
+    )
+    assert "FRAMES 3" in out.stdout, out.stderr[-2000:]
