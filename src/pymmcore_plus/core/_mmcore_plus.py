@@ -1683,7 +1683,7 @@ class CMMCorePlus(pymmcore.CMMCore):
     def run_smart(
         self,
         base: MDASequence,
-        script: str | Path | ScriptSpec | SmartRunConfig,
+        analyzer: str | Path | ScriptSpec | SmartRunConfig | Any,
         *,
         output: SingleOutput | None = None,
         run_dir: str | Path | Literal["auto"] | None = None,
@@ -1702,8 +1702,10 @@ class CMMCorePlus(pymmcore.CMMCore):
         ----------
         base : useq.MDASequence
             The base acquisition (it must contain at least one event).
-        script : str | Path | ScriptSpec | SmartRunConfig
-            The analysis script, or a fully specified `SmartRunConfig`.
+        analyzer : str | Path | ScriptSpec | SmartRunConfig | Analyzer
+            A path to an analysis script, an object with an ``analyze`` method
+            (see [`pymmcore_plus.smart.Analyzer`][]), or a ready
+            `SmartRunConfig`.
         output : SingleOutput | None, optional
             Where to save the data, as for `run_mda`. Every frame of a smart run
             is stored along a single ``t`` axis, in acquisition order.
@@ -1715,7 +1717,7 @@ class CMMCorePlus(pymmcore.CMMCore):
         block : bool, optional
             If True, block until the run has finished, by default False.
         **options
-            Passed to `SmartRunConfig.from_script`: ``params``, ``execution``
+            Passed to `SmartRunConfig.from_analyzer`: ``params``, ``execution``
             ("thread" or "process"), ``sync`` ("blocking" or "async"), ...
 
         Returns
@@ -1726,7 +1728,9 @@ class CMMCorePlus(pymmcore.CMMCore):
         from pymmcore_plus.smart import SmartRunner
 
         runner = SmartRunner(self)
-        runner.run(base, script, output=output, run_dir=run_dir, block=block, **options)
+        runner.run(
+            base, analyzer, output=output, run_dir=run_dir, block=block, **options
+        )
         return runner
 
     def register_mda_engine(self, engine: PMDAEngine) -> None:

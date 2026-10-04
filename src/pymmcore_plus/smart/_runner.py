@@ -43,7 +43,12 @@ from pymmcore_plus.smart._executors import (
     ExecutorStartError,
     create_executor,
 )
-from pymmcore_plus.smart._loader import AnalyzeFilter, ScriptSpec, inspect_script
+from pymmcore_plus.smart._loader import (
+    AnalyzeFilter,
+    ScriptSpec,
+    inspect_analyzer,
+    inspect_script,
+)
 from pymmcore_plus.smart._log import (
     SmartRunLog,
     data_path_for_output,
@@ -85,6 +90,15 @@ RunDir = Path | str | Literal["auto"] | None
 TEARDOWN_TIMEOUT_S: Final = 10.0
 
 
+def _as_spec(analyzer: str | Path | ScriptSpec | Any) -> ScriptSpec:
+    """A `ScriptSpec` for a script path, an analysis object, or a spec."""
+    if isinstance(analyzer, ScriptSpec):
+        return analyzer
+    if isinstance(analyzer, (str, Path)):
+        return inspect_script(analyzer)
+    return inspect_analyzer(analyzer)
+
+
 class SmartRunError(RuntimeError):
     """A smart run could not be prepared or started."""
 
@@ -93,7 +107,8 @@ class SmartRunError(RuntimeError):
 class SmartRunConfig:
     """Everything that determines how a smart run behaves.
 
-    Build one with `from_script`, which reads the script's own defaults.
+    Build one with `from_analyzer`, which reads the script's (or object's)
+    own declared defaults.
     """
 
     spec: ScriptSpec
@@ -112,9 +127,9 @@ class SmartRunConfig:
     setup_timeout_s: float = 60.0
 
     @classmethod
-    def from_script(
+    def from_analyzer(
         cls,
-        script: str | Path | ScriptSpec,
+        analyzer: str | Path | ScriptSpec | Any,
         *,
         params: dict[str, Any] | None = None,
         execution: ExecutionMode | None = None,
@@ -123,11 +138,13 @@ class SmartRunConfig:
         filter: AnalyzeFilter | None = None,
         **options: Any,
     ) -> SmartRunConfig:
-        """A config for *script*: its declared defaults, updated by the arguments.
+        """A config for *analyzer*: its declared defaults, with the arguments on top.
 
+        *analyzer* is a path to a script file, an object with an ``analyze``
+        method (see `Analyzer`), or an already-inspected `ScriptSpec`.
         Unknown or invalid *params* are ignored (see `ScriptSpec.resolve_params`).
         """
-        spec = script if isinstance(script, ScriptSpec) else inspect_script(script)
+        spec = _as_spec(analyzer)
         return cls(
             spec=spec,
             params=spec.resolve_params(params),
@@ -141,7 +158,11 @@ class SmartRunConfig:
     def to_json(self) -> dict[str, Any]:
         return {
             "script": {
-                "path": str(self.spec.path),
+                "path": None if self.spec.path is None else str(self.spec.path),
+                "analyzer": None
+                if self.spec.analyzer is None
+                else f"{type(self.spec.analyzer).__module__}."
+                f"{type(self.spec.analyzer).__qualname__}",
                 "name": self.spec.name,
                 "sha256": self.spec.sha256,
                 "api_version": self.spec.api_version,
@@ -217,7 +238,7 @@ class SmartRunner:
 
     or, step by step (e.g. to prepare a slow process worker off a GUI thread):
 
-    >>> config = SmartRunConfig.from_script("script.py", execution="process")
+    >>> config = SmartRunConfig.from_analyzer("script.py", execution="process")
     >>> runner.prepare(sequence, config, output="data.ome.zarr", run_dir="auto")
     >>> runner.start()
     >>> summary = runner.wait()
@@ -287,7 +308,7 @@ class SmartRunner:
     def run(
         self,
         base: useq.MDASequence,
-        script: str | Path | ScriptSpec | SmartRunConfig,
+        analyzer: str | Path | ScriptSpec | SmartRunConfig | Any,
         *,
         output: SingleOutput | None = None,
         run_dir: RunDir = None,
@@ -295,16 +316,18 @@ class SmartRunner:
         timeout: float | None = None,
         **options: Any,
     ) -> dict[str, Any] | None:
-        """Prepare and start a run of *script* over *base*.
+        """Prepare and start a run of *analyzer* over *base*.
 
-        *options* are passed to `SmartRunConfig.from_script` (``params``,
-        ``execution``, ``sync``...). With *block*, waits for the run to finish
-        and returns its summary; otherwise returns None (see `wait`).
+        *analyzer* is a path to a script file, or an object with an
+        ``analyze`` method (see `Analyzer`). *options* are passed to
+        `SmartRunConfig.from_analyzer` (``params``, ``execution``,
+        ``sync``...). With *block*, waits for the run to finish and returns
+        its summary; otherwise returns None (see `wait`).
         """
         config = (
-            script
-            if isinstance(script, SmartRunConfig)
-            else SmartRunConfig.from_script(script, **options)
+            analyzer
+            if isinstance(analyzer, SmartRunConfig)
+            else SmartRunConfig.from_analyzer(analyzer, **options)
         )
         self.prepare(base, config, output=output, run_dir=run_dir)
         self.start()
@@ -345,6 +368,7 @@ class SmartRunner:
         system = SystemInfo.from_core(self._mmc)
         host = HostConfig(
             path=config.spec.path,
+            analyzer=config.spec.analyzer,
             params=dict(config.params),
             source=config.spec.source,
             run_dir=resolved_dir,
@@ -411,7 +435,7 @@ class SmartRunner:
             max_burst=config.max_burst,
         )
         if (log := self._log) is not None:
-            log.open(self._run_info, config.spec.source, packages=self._packages)
+            log.open(self._run_info, config.spec.source or "", packages=self._packages)
         if (setup := self._setup_result) is not None:
             self._record_result(setup, injected=0, dropped=False)
 
@@ -944,7 +968,7 @@ def _system_json(system: SystemInfo) -> dict[str, Any]:
 
 
 def dry_run(
-    script: str | Path | ScriptSpec | SmartRunConfig,
+    analyzer: str | Path | ScriptSpec | SmartRunConfig | Any,
     image: np.ndarray,
     frame: FrameInfo | None = None,
     *,
@@ -953,7 +977,7 @@ def dry_run(
     base_sequence: useq.MDASequence | None = None,
     **options: Any,
 ) -> HookResult:
-    """Call a script's ``analyze`` once on *image*; nothing is acquired.
+    """Call an ``analyze`` hook once on *image*; nothing is acquired.
 
     The script is loaded in a throwaway worker of the configured execution
     mode, and its ``setup``, ``analyze`` and ``teardown`` run once -- the
@@ -961,8 +985,9 @@ def dry_run(
 
     Parameters
     ----------
-    script : str | Path | ScriptSpec | SmartRunConfig
-        The script (*options* go to `SmartRunConfig.from_script`).
+    analyzer : str | Path | ScriptSpec | SmartRunConfig | Analyzer
+        The script or analysis object (*options* go to
+        `SmartRunConfig.from_analyzer`).
     image : np.ndarray
         The image to analyze (e.g. ``core.getImage()`` after a snap).
     frame : FrameInfo, optional
@@ -983,9 +1008,9 @@ def dry_run(
     import tempfile
 
     config = (
-        script
-        if isinstance(script, SmartRunConfig)
-        else SmartRunConfig.from_script(script, **options)
+        analyzer
+        if isinstance(analyzer, SmartRunConfig)
+        else SmartRunConfig.from_analyzer(analyzer, **options)
     )
     if system is None:
         system = SystemInfo.from_core(core) if core is not None else SystemInfo()
@@ -994,6 +1019,7 @@ def dry_run(
     with tempfile.TemporaryDirectory(prefix="pymmcore-smart-dry-run-") as tmp:
         host = HostConfig(
             path=config.spec.path,
+            analyzer=config.spec.analyzer,
             params=dict(config.params),
             source=config.spec.source,
             run_dir=Path(tmp),

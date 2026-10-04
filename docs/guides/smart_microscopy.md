@@ -38,6 +38,46 @@ repository's
 [`examples/smart_microscopy`](https://github.com/pymmcore-plus/pymmcore-plus/tree/main/examples/smart_microscopy)
 folder.
 
+## A script file, or an object
+
+The analysis can be **a script file** -- a path, whose constants and hooks are
+read without executing it -- or **an object** with an `analyze` method. Both
+run identically, in a thread or a process.
+
+Use a script file when a front end should load, edit and reload it (the
+pymmcore-gui tab does), or when it is a standalone experiment. Use an object
+for ordinary Python work: the run's state lives on `self`, its settings are
+`__init__` arguments, and the class is importable and unit-testable.
+
+```python
+class AdaptiveExposure:
+    NAME = "Adaptive exposure"  # optional, like a script's constants
+    SYNC = "blocking"
+
+    def __init__(self, target_mean: float = 2000.0) -> None:
+        self.target_mean = target_mean
+        self.means: list[float] = []
+
+    def setup(self, ctx): ...  # optional
+    def after_base(self, ctx): ...  # optional
+    def teardown(self, ctx): ...  # optional
+
+    def analyze(self, image, frame, ctx):
+        self.means.append(float(image.mean()))
+        return useq.MDAEvent(exposure=...)
+
+
+analyzer = AdaptiveExposure(target_mean=1500)
+core.run_smart(useq.MDASequence(channels=["DAPI"]), analyzer, block=True)
+print(analyzer.means)  # in thread mode, your own object was used
+```
+
+In **process mode** the object is pickled to the worker, so define the class
+at module level (not inside a function) and keep its state picklable; the
+copy that ran stays in the worker, so report results through `ctx.record`.
+See
+[`examples/smart_microscopy/analyzer_object.py`](https://github.com/pymmcore-plus/pymmcore-plus/tree/main/examples/smart_microscopy/analyzer_object.py).
+
 ## Everything in one file
 
 The script does not have to be a separate file. Pass ``__file__`` and keep
@@ -71,7 +111,9 @@ if __name__ == "__main__":
 A complete version is in
 [`examples/smart_microscopy/single_file.py`](https://github.com/pymmcore-plus/pymmcore-plus/tree/main/examples/smart_microscopy/single_file.py).
 Without the guard the worker would re-run the acquisition as it loads the
-module, so keep it even in thread mode.
+module, so keep it even in thread mode. An analysis *object* needs no guard
+for loading (nothing is re-executed), only the usual one that
+`multiprocessing` requires in process mode.
 
 ## Writing a script
 

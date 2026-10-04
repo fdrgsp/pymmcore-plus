@@ -11,11 +11,22 @@ from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Final, Literal, TypedDict, get_args
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Final,
+    Literal,
+    Protocol,
+    TypedDict,
+    get_args,
+    runtime_checkable,
+)
 
 import useq
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from pymmcore_plus import CMMCorePlus
 
 API_VERSION: Final = 1
@@ -266,6 +277,41 @@ class AnalysisContext:
         logs, records = self._logs, self._records
         self._logs, self._records = [], {}
         return logs, records
+
+
+@runtime_checkable
+class Analyzer(Protocol):
+    """What an analysis object must provide: `analyze`, and optional hooks.
+
+    An alternative to a script file: keep the hooks on a class, with the
+    run's state on ``self`` and its settings as ``__init__`` arguments.
+
+    ```python
+    class Tracker:
+        def __init__(self, threshold: float = 1000.0) -> None:
+            self.threshold = threshold
+            self.hits = 0
+
+        def analyze(self, image, frame, ctx):
+            if float(image.max()) > self.threshold:
+                self.hits += 1
+                return useq.MDAEvent(exposure=50)
+
+
+    core.run_smart(sequence, Tracker(threshold=2000))
+    ```
+
+    In process mode the object is sent to the worker, so it must be
+    picklable: define the class at module level (not inside a function), and
+    keep only picklable state on it.
+
+    Optional class attributes mirror a script's constants, and set the
+    defaults a front end offers: ``NAME``, ``DESCRIPTION``, ``EXECUTION``,
+    ``SYNC``, ``SEQUENCING``, ``ANALYZE``, ``PARAMETERS``.
+    """
+
+    def analyze(self, image: np.ndarray, frame: FrameInfo, ctx: AnalysisContext) -> Any:
+        """Decide what to acquire after *image*; see `Response`."""
 
 
 # ------------------------------------------------------------------- response

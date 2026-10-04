@@ -32,12 +32,17 @@ def teardown(ctx): ...
 """
 
 
+# Examples that are not script files: a runner, and a class-based analyzer
+# (checked by test_object_* in test_runner.py instead).
+NOT_SCRIPTS = {"run_smart.py", "analyzer_object.py"}
+
+
 @pytest.mark.parametrize(
     "path",
-    sorted(p for p in EXAMPLES.glob("*.py") if p.name != "run_smart.py"),
+    sorted(p for p in EXAMPLES.glob("*.py") if p.name not in NOT_SCRIPTS),
     ids=lambda p: p.stem,
 )
-def test_templates_are_valid(path: Path) -> None:
+def test_example_scripts_are_valid(path: Path) -> None:
     spec = inspect_script(path)
     assert spec.api_version == 1
     assert spec.name

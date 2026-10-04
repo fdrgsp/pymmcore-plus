@@ -11,7 +11,11 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import inspect
+from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
@@ -31,6 +35,8 @@ if TYPE_CHECKING:
     import useq
 
 ParamKind = Literal["float", "int", "bool", "str", "choice"]
+Constants = Mapping[str, tuple[Any, int | None]]
+"""Declared values, each with the source line it came from (None for an object)."""
 
 _KNOWN_CONSTANTS: Final = frozenset(
     {
@@ -125,10 +131,15 @@ class AnalyzeFilter:
 
 @dataclass(frozen=True)
 class ScriptSpec:
-    """Everything statically known about a script."""
+    """Everything known about an analysis script, or analysis object, up front.
 
-    path: Path
-    source: str
+    For a script file this is read from the source without executing it (see
+    `inspect_script`). For an object it is read from its attributes (see
+    `inspect_analyzer`), and ``analyzer`` holds the object itself.
+    """
+
+    path: Path | None
+    source: str | None
     sha256: str
     api_version: int
     name: str
@@ -141,6 +152,8 @@ class ScriptSpec:
     has_setup: bool
     has_teardown: bool
     has_after_base: bool = False
+    analyzer: Any = None
+    """The analysis object, when this does not come from a script file."""
 
     def default_params(self) -> dict[str, Any]:
         return {p.name: p.default for p in self.params}
@@ -161,6 +174,54 @@ class ScriptSpec:
             except (TypeError, ValueError):
                 continue
         return resolved
+
+
+def inspect_analyzer(analyzer: Any) -> ScriptSpec:
+    """Describe an analysis object (see `pymmcore_plus.smart.Analyzer`).
+
+    Its optional class attributes (``NAME``, ``PARAMETERS``, ``SYNC``...) are
+    read like a script's constants; everything else is derived from the
+    methods it defines.
+    """
+    if not callable(getattr(analyzer, "analyze", None)):
+        raise ScriptError(
+            f"{type(analyzer).__name__} has no callable analyze(image, frame, ctx)."
+        )
+    get = partial(getattr, analyzer)
+    name = str(get("NAME", None) or type(analyzer).__name__)
+    constants = {
+        key: (value, None)
+        for key in ("NAME", "DESCRIPTION", "EXECUTION", "SYNC", "SEQUENCING")
+        if (value := get(key, None)) is not None
+    }
+    source: str | None = None
+    with suppress(OSError, TypeError):
+        source = inspect.getsource(type(analyzer))
+    return ScriptSpec(
+        path=None,
+        source=source,
+        sha256=hashlib.sha256((source or name).encode()).hexdigest(),
+        api_version=API_VERSION,
+        name=name,
+        description=str(get("DESCRIPTION", "") or ""),
+        execution=cast(
+            "ExecutionMode",
+            _choice_constant(constants, "EXECUTION", EXECUTION_MODES, "thread"),
+        ),
+        sync=cast(
+            "SyncMode", _choice_constant(constants, "SYNC", SYNC_MODES, "blocking")
+        ),
+        sequencing=cast(
+            "SequencingMode",
+            _choice_constant(constants, "SEQUENCING", SEQUENCING_MODES, "safe"),
+        ),
+        filter=_read_filter({"ANALYZE": (get("ANALYZE", {}) or {}, None)}),
+        params=_read_params({"PARAMETERS": (get("PARAMETERS", {}) or {}, None)}),
+        has_setup=callable(get("setup", None)),
+        has_teardown=callable(get("teardown", None)),
+        has_after_base=callable(get("after_base", None)),
+        analyzer=analyzer,
+    )
 
 
 def inspect_script(path: str | Path) -> ScriptSpec:
@@ -274,7 +335,7 @@ def _read_hooks(tree: ast.Module) -> set[str]:
     return hooks
 
 
-def _str_constant(constants: dict[str, tuple[Any, int]], key: str) -> str:
+def _str_constant(constants: Constants, key: str) -> str:
     if key not in constants:
         return ""
     value, line = constants[key]
@@ -284,7 +345,7 @@ def _str_constant(constants: dict[str, tuple[Any, int]], key: str) -> str:
 
 
 def _choice_constant(
-    constants: dict[str, tuple[Any, int]],
+    constants: Constants,
     key: str,
     choices: tuple[str, ...],
     default: str,
@@ -297,7 +358,7 @@ def _choice_constant(
     return str(value)
 
 
-def _read_filter(constants: dict[str, tuple[Any, int]]) -> AnalyzeFilter:
+def _read_filter(constants: Constants) -> AnalyzeFilter:
     if "ANALYZE" not in constants:
         return AnalyzeFilter()
     value, line = constants["ANALYZE"]
@@ -339,7 +400,7 @@ def _read_filter(constants: dict[str, tuple[Any, int]]) -> AnalyzeFilter:
     )
 
 
-def _read_params(constants: dict[str, tuple[Any, int]]) -> tuple[ParamDef, ...]:
+def _read_params(constants: Constants) -> tuple[ParamDef, ...]:
     if "PARAMETERS" not in constants:
         return ()
     value, line = constants["PARAMETERS"]
@@ -353,7 +414,7 @@ def _read_params(constants: dict[str, tuple[Any, int]]) -> tuple[ParamDef, ...]:
     return tuple(params)
 
 
-def _param_def(name: str, entry: Any, line: int) -> ParamDef:
+def _param_def(name: str, entry: Any, line: int | None) -> ParamDef:
     spec: dict[str, Any] = entry if isinstance(entry, dict) else {"default": entry}
     if unknown := set(spec) - _SPEC_KEYS:
         raise ScriptError(

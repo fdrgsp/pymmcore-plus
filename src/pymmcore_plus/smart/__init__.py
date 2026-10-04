@@ -21,6 +21,7 @@ from ._api import (
     API_VERSION,
     STOP,
     AnalysisContext,
+    Analyzer,
     ExecutionMode,
     FrameInfo,
     ParamSpec,
@@ -30,7 +31,14 @@ from ._api import (
     SyncMode,
     SystemInfo,
 )
-from ._loader import AnalyzeFilter, ParamDef, ScriptError, ScriptSpec, inspect_script
+from ._loader import (
+    AnalyzeFilter,
+    ParamDef,
+    ScriptError,
+    ScriptSpec,
+    inspect_analyzer,
+    inspect_script,
+)
 from ._runner import (
     SmartRunConfig,
     SmartRunError,
@@ -46,6 +54,7 @@ __all__ = [
     "STOP",
     "AnalysisContext",
     "AnalyzeFilter",
+    "Analyzer",
     "ExecutionMode",
     "FrameInfo",
     "HookResult",
@@ -64,5 +73,6 @@ __all__ = [
     "SyncMode",
     "SystemInfo",
     "dry_run",
+    "inspect_analyzer",
     "inspect_script",
 ]

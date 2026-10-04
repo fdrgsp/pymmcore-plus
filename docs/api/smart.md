@@ -16,6 +16,8 @@ that react to their own images, steered by an analysis script. See the
 
 ## Script API
 
+::: pymmcore_plus.smart.Analyzer
+
 ::: pymmcore_plus.smart.FrameInfo
 
 ::: pymmcore_plus.smart.AnalysisContext
@@ -31,6 +33,8 @@ that react to their own images, steered by an analysis script. See the
 ## Inspecting scripts
 
 ::: pymmcore_plus.smart.inspect_script
+
+::: pymmcore_plus.smart.inspect_analyzer
 
 ::: pymmcore_plus.smart.ScriptSpec
 

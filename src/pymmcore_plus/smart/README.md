@@ -134,7 +134,13 @@ runner thread ── sequenceFinished (direct) ─▶ _finalize → finalizer th
     another thread). It goes through the same `normalise_response` ->
     `_queue` -> `iterator.inject` path as a hook's response, tagged
     `origin="external"` with no `parent_frame_id`.
-13. **Status reporting:** a run's status comes from the runner's own flags
+13. **The analysis can be an object instead of a file.** `inspect_analyzer`
+    builds a `ScriptSpec` from an object's attributes (so `ScriptSpec.path`
+    and `.source` are optional, and `.analyzer` holds the object), and
+    `_ScriptHost` then takes its hooks from that object instead of compiling
+    a module. Everything downstream is unchanged. In process mode the object
+    travels inside `HostConfig`, so it must be picklable.
+14. **Status reporting:** a run's status comes from the runner's own flags
     first (`user_cancelled`, `iterator.stop_reason`), then from
     `core.mda.status.finish_reason`. A cancel from elsewhere can end the
     run at an event boundary without the iterator ever being asked again.

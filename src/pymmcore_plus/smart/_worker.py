@@ -15,7 +15,6 @@ import time
 import traceback
 import types
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pymmcore_plus.smart._api import (
@@ -27,6 +26,7 @@ from pymmcore_plus.smart._api import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     import numpy as np
     import useq
@@ -40,7 +40,7 @@ _MODULE_COUNTER = itertools.count()
 class HostConfig:
     """Everything needed to load a script; picklable (sent to a child process)."""
 
-    path: Path
+    path: Path | None = None
     params: dict[str, Any] = field(default_factory=dict)
     source: str | None = None
     """The exact text to run (what was inspected and archived); None: read *path*."""
@@ -48,6 +48,11 @@ class HostConfig:
     max_events_per_response: int = 1000
     system: SystemInfo = field(default_factory=SystemInfo)
     base_sequence: useq.MDASequence | None = None
+    analyzer: Any = None
+    """An analysis object, used instead of the script at *path* (see `Analyzer`).
+
+    Last, so the positional order of the other fields is unchanged.
+    """
 
 
 @dataclass
@@ -85,8 +90,10 @@ class _ScriptHost:
         self._module_name = ""
         self._sys_path_entry: str | None = None
         self._import_error: str | None = None
+        self._analyzer = config.analyzer
         try:
-            self._import()
+            if self._analyzer is None:
+                self._import()
         except BaseException as e:
             if isinstance(e, (KeyboardInterrupt, SystemExit)):
                 raise
@@ -97,7 +104,8 @@ class _ScriptHost:
         return self._import_error
 
     def _import(self) -> None:
-        path = Path(self._config.path)
+        if (path := self._config.path) is None:  # pragma: no cover - guarded above
+            raise ValueError("No script path and no analysis object.")
         # Sibling helper modules next to the script must be importable.
         script_dir = str(path.parent)
         if script_dir not in sys.path:
@@ -122,7 +130,9 @@ class _ScriptHost:
         self._module = module
 
     def _hook(self, name: str) -> Callable[..., Any] | None:
-        hook = getattr(self._module, name, None)
+        """The named hook: a method of the analysis object, or a module function."""
+        source = self._module if self._analyzer is None else self._analyzer
+        hook = getattr(source, name, None)
         return hook if callable(hook) else None
 
     def setup(self) -> HookResult:
@@ -143,12 +153,13 @@ class _ScriptHost:
         return self._call("after_base", None, self._hook("after_base"), self.ctx)
 
     def teardown(self) -> HookResult:
-        if self._module is None:
+        if self._module is None and self._analyzer is None:
             return HookResult("teardown", ok=True)
         return self._call("teardown", None, self._hook("teardown"), self.ctx)
 
     def close(self) -> None:
         """Forget the module and undo the sys.path change (thread mode)."""
+        self._analyzer = None
         sys.modules.pop(self._module_name, None)
         if self._sys_path_entry is not None:
             try:

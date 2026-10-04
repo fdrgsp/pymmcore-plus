@@ -405,7 +405,7 @@ def test_script_error_policy(
     errors: list[tuple[str, bool]] = []
     runner = SmartRunner(core)
     runner.events.analysisError.connect(lambda m, f: errors.append((m, f)))
-    config = SmartRunConfig.from_script(script, on_error=on_error)
+    config = SmartRunConfig.from_analyzer(script, on_error=on_error)
     summary = runner.run(
         useq.MDASequence(time_plan={"interval": 0, "loops": 5}), config, timeout=30
     )
@@ -708,7 +708,7 @@ def test_max_burst_bounds_preemption(core: CMMCorePlus, tmp_path: Path) -> None:
     core.mda.engine.use_hardware_sequencing = True
     started = _burst_counter(core)
     script = _script(tmp_path, NOOP)
-    config = SmartRunConfig.from_script(script, sync="async", max_burst=5)
+    config = SmartRunConfig.from_analyzer(script, sync="async", max_burst=5)
     runner = SmartRunner(core)
     runner.prepare(FAST_BASE, config)
     runner.start()
@@ -722,10 +722,10 @@ def test_sequencing_is_read_from_the_script(tmp_path: Path) -> None:
 
     script = _script(tmp_path, 'API_VERSION = 1\nSEQUENCING = "off"\n' + NOOP)
     assert inspect_script(script).sequencing == "off"
-    assert SmartRunConfig.from_script(script).sequencing == "off"
+    assert SmartRunConfig.from_analyzer(script).sequencing == "off"
     # an explicit argument still wins
     assert (
-        SmartRunConfig.from_script(script, sequencing="always").sequencing == "always"
+        SmartRunConfig.from_analyzer(script, sequencing="always").sequencing == "always"
     )
 
 
@@ -742,7 +742,7 @@ def _started_runner(core: CMMCorePlus, tmp_path: Path, **options: Any) -> SmartR
     runner.events.frameAcquired.connect(lambda _r: seen.set())
     runner.prepare(
         SLOW_BASE,
-        SmartRunConfig.from_script(script, **options),
+        SmartRunConfig.from_analyzer(script, **options),
         output="memory",
         run_dir=tmp_path / "run",
     )
@@ -822,7 +822,7 @@ def test_external_frames_can_be_excluded_from_analysis(
     runner.events.frameAcquired.connect(lambda _r: seen.set())
     runner.prepare(
         SLOW_BASE,
-        SmartRunConfig.from_script(script),
+        SmartRunConfig.from_analyzer(script),
         output="memory",
         run_dir=tmp_path / "run",
     )
@@ -862,3 +862,98 @@ def test_a_script_can_be_the_file_that_runs_it(tmp_path: Path, mode: str) -> Non
         [sys.executable, str(script)], capture_output=True, text=True, timeout=180
     )
     assert "FRAMES 3" in out.stdout, out.stderr[-2000:]
+
+
+class Tracker:
+    """An analysis object: hooks as methods, state on self."""
+
+    NAME = "Tracker"
+    SYNC = "blocking"
+
+    def __init__(self, n_frames: int = 3) -> None:
+        self.n_frames = n_frames
+        self.means: list[float] = []
+
+    def setup(self, ctx: Any) -> None:
+        ctx.log(f"tracking up to {self.n_frames} frames")
+
+    def analyze(self, image: Any, frame: Any, ctx: Any) -> Any:
+        self.means.append(float(image.mean()))
+        ctx.record(seen=len(self.means), where=ctx.execution)
+        if len(self.means) >= self.n_frames:
+            from pymmcore_plus.smart import STOP
+
+            return STOP
+        return useq.MDAEvent()
+
+    def teardown(self, ctx: Any) -> None:
+        ctx.log(f"done after {len(self.means)} frames")
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_an_object_can_be_the_analyzer(
+    core: CMMCorePlus, tmp_path: Path, mode: str
+) -> None:
+    runner = SmartRunner(core)
+    logs: list[str] = []
+    runner.events.logMessage.connect(lambda _lvl, msg: logs.append(msg))
+    summary = runner.run(
+        ONE,
+        Tracker(n_frames=4),
+        output="memory",
+        run_dir=tmp_path / "run",
+        execution=mode,
+        timeout=60,
+    )
+    assert summary is not None
+    assert summary["status"] == "stopped_by_script"
+    assert summary["frames"] == 4
+    assert "tracking up to 4 frames" in logs
+    assert "done after 4 frames" in logs
+    analysed = [
+        a for a in _lines(tmp_path / "run" / "analysis.jsonl") if a["call"] == "analyze"
+    ]
+    assert [a["records"]["seen"] for a in analysed] == [1, 2, 3, 4]
+    assert {a["records"]["where"] for a in analysed} == {mode}
+    # run.json names the class, since there is no script path
+    run = json.loads((tmp_path / "run" / "run.json").read_text())
+    assert run["script"]["path"] is None
+    assert run["script"]["analyzer"].endswith("Tracker")
+
+
+def test_object_state_is_kept_in_thread_mode(core: CMMCorePlus) -> None:
+    """In-process, the very object the caller passed is the one that is used."""
+    tracker = Tracker(n_frames=3)
+    SmartRunner(core).run(ONE, tracker, output="memory", execution="thread", timeout=60)
+    assert len(tracker.means) == 3
+
+
+def test_object_defaults_and_overrides(core: CMMCorePlus) -> None:
+    from pymmcore_plus.smart import SmartRunConfig, inspect_analyzer
+
+    spec = inspect_analyzer(Tracker())
+    assert spec.name == "Tracker"
+    assert spec.sync == "blocking"  # from the class attribute
+    assert spec.has_setup and spec.has_teardown and not spec.has_after_base
+    assert spec.analyzer is not None
+    config = SmartRunConfig.from_analyzer(Tracker(), sync="async")
+    assert config.sync == "async"  # an explicit argument still wins
+
+
+def test_object_without_analyze_is_refused() -> None:
+    from pymmcore_plus.smart import ScriptError, inspect_analyzer
+
+    class NotAnAnalyzer:
+        pass
+
+    with pytest.raises(ScriptError, match="no callable analyze"):
+        inspect_analyzer(NotAnAnalyzer())
+
+
+def test_dry_run_accepts_an_object(core: CMMCorePlus) -> None:
+    from pymmcore_plus.smart import dry_run
+
+    core.snapImage()
+    result = dry_run(Tracker(n_frames=99), core.getImage(), core=core)
+    assert result.ok, result.error
+    assert result.records["seen"] == 1
