@@ -38,16 +38,30 @@ repository's
 [`examples/smart_microscopy`](https://github.com/pymmcore-plus/pymmcore-plus/tree/main/examples/smart_microscopy)
 folder.
 
-## A script file, or an object
+## Functions or a class; a file or an object
 
-The analysis can be **a script file** -- a path, whose constants and hooks are
-read without executing it -- or **an object** with an `analyze` method. Both
-run identically, in a thread or a process.
+Two independent choices.
 
-Use a script file when a front end should load, edit and reload it (the
-pymmcore-gui tab does), or when it is a standalone experiment. Use an object
-for ordinary Python work: the run's state lives on `self`, its settings are
-`__init__` arguments, and the class is importable and unit-testable.
+**How you write the hooks**: as module-level functions, or as the methods of
+a class. A class keeps the run's state on `self` instead of `ctx.state`, and
+can be imported and unit-tested like anything else. Subclassing
+[`SmartAnalyzer`][pymmcore_plus.smart.SmartAnalyzer] is optional -- any
+object with an `analyze` method satisfies
+[`Analyzer`][pymmcore_plus.smart.Analyzer] -- but it gives you the hook
+signatures, no-op defaults for the hooks you do not need, and an immediate
+error if `analyze` is missing.
+
+**How you hand it over**: as a path to a `.py` file, or as an object. A file
+can be loaded, edited and reloaded by a front end (the pymmcore-gui tab does
+that) and is inspected without being executed. An object is the natural
+choice from a notebook or a script of your own.
+
+| | A file | An object |
+|---|---|---|
+| Functions | the default; see the other examples | – |
+| A class | `class_script.py`; the runner builds it, `PARAMETERS` fill `ctx.params` | `analyzer_object.py`; you build it, `__init__` takes whatever you like |
+
+A script defines *either* module-level hooks *or* one class, not both.
 
 ```python
 class AdaptiveExposure:

@@ -6,6 +6,7 @@ a spawned analysis process, where only the stdlib, numpy and useq are wanted.
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import islice
@@ -14,6 +15,7 @@ from types import MappingProxyType
 from typing import (
     TYPE_CHECKING,
     Any,
+    ClassVar,
     Final,
     Literal,
     Protocol,
@@ -312,6 +314,84 @@ class Analyzer(Protocol):
 
     def analyze(self, image: np.ndarray, frame: FrameInfo, ctx: AnalysisContext) -> Any:
         """Decide what to acquire after *image*; see `Response`."""
+
+
+class SmartAnalyzer(ABC):
+    """Optional base class for an analysis object.
+
+    Subclassing is never required -- any object with an ``analyze`` method
+    satisfies `Analyzer` -- but it gives the hook signatures (so an editor can
+    complete them), no-op defaults for the optional hooks, and an immediate
+    error if ``analyze`` is missing.
+
+    Declare settings as class attributes, exactly like a script's constants:
+
+    ```python
+    class Tracker(SmartAnalyzer):
+        NAME = "Tracker"
+        SYNC = "async"
+        PARAMETERS = {"threshold": 1000.0}
+
+        def __init__(self) -> None:
+            self.hits = 0
+
+        def analyze(self, image, frame, ctx):
+            if float(image.max()) > ctx.params["threshold"]:
+                self.hits += 1
+                return useq.MDAEvent(exposure=50)
+    ```
+
+    An instance can be handed straight to a runner. The same class can also
+    live in a script file, where the runner instantiates it with no arguments
+    and its ``PARAMETERS`` fill ``ctx.params``.
+    """
+
+    NAME: ClassVar[str] = ""
+    """Shown by front ends; the class name is used when empty."""
+    DESCRIPTION: ClassVar[str] = ""
+    EXECUTION: ClassVar[ExecutionMode] = "thread"
+    SYNC: ClassVar[SyncMode] = "blocking"
+    SEQUENCING: ClassVar[SequencingMode] = "safe"
+    ANALYZE: ClassVar[Mapping[str, Any]] = {}
+    """Which frames reach `analyze`: ``channels``, ``every_nth``, ``origins``."""
+    PARAMETERS: ClassVar[Mapping[str, Any]] = {}
+    """User-settable values, offered by a front end and resolved into ``ctx.params``."""
+
+    # B027: deliberately empty and *not* abstract -- these hooks are optional,
+    # and `implemented_hooks` tells an override from this default.
+    def setup(self, ctx: AnalysisContext) -> None:  # noqa: B027
+        """Called once before the first frame is acquired."""
+
+    @abstractmethod
+    def analyze(self, image: np.ndarray, frame: FrameInfo, ctx: AnalysisContext) -> Any:
+        """Decide what to acquire after *image*; see `Response`."""
+
+    def after_base(self, ctx: AnalysisContext) -> Any:
+        """Called once the base acquisition and its analyses are done."""
+        return None
+
+    def teardown(self, ctx: AnalysisContext) -> None:  # noqa: B027
+        """Called once when the run ends, however it ended."""
+
+
+def implemented_hooks(analyzer: object) -> set[str]:
+    """Which optional hooks *analyzer* actually provides.
+
+    A `SmartAnalyzer` inherits no-op ``setup``/``after_base``/``teardown``, so
+    merely having the attribute means nothing: only an override counts, or the
+    run would call an empty hook (and, for ``after_base``, wait on a worker
+    round-trip at the end of every run).
+    """
+    found = set()
+    for name in ("setup", "after_base", "teardown"):
+        hook = getattr(analyzer, name, None)
+        if not callable(hook):
+            continue
+        base = getattr(SmartAnalyzer, name, None)
+        if base is not None and getattr(hook, "__func__", hook) is base:
+            continue  # inherited no-op
+        found.add(name)
+    return found
 
 
 # ------------------------------------------------------------------- response

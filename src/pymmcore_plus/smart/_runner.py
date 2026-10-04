@@ -369,6 +369,7 @@ class SmartRunner:
         host = HostConfig(
             path=config.spec.path,
             analyzer=config.spec.analyzer,
+            class_name=config.spec.class_name,
             params=dict(config.params),
             source=config.spec.source,
             run_dir=resolved_dir,
@@ -1020,6 +1021,7 @@ def dry_run(
         host = HostConfig(
             path=config.spec.path,
             analyzer=config.spec.analyzer,
+            class_name=config.spec.class_name,
             params=dict(config.params),
             source=config.spec.source,
             run_dir=Path(tmp),

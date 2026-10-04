@@ -28,6 +28,7 @@ from ._api import (
     PixelConfig,
     Response,
     SequencingMode,
+    SmartAnalyzer,
     SyncMode,
     SystemInfo,
 )
@@ -65,6 +66,7 @@ __all__ = [
     "ScriptError",
     "ScriptSpec",
     "SequencingMode",
+    "SmartAnalyzer",
     "SmartRunConfig",
     "SmartRunError",
     "SmartRunStats",

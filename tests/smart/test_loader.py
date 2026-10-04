@@ -144,3 +144,63 @@ def test_after_base_hook_detected() -> None:
     assert not inspect_source(V + A).has_after_base
     with pytest.raises(ScriptError, match="exactly 1"):
         inspect_source(V + A + "def after_base(): ...\n")
+
+
+CLASS_SCRIPT = """
+from pymmcore_plus.smart import SmartAnalyzer
+
+API_VERSION = 1
+
+
+class Tracker(SmartAnalyzer):
+    NAME = "From a class"
+    SYNC = "async"
+    PARAMETERS = {"threshold": 0.5}
+
+    def setup(self, ctx): ...
+    def analyze(self, image, frame, ctx): ...
+"""
+
+
+def test_a_script_may_define_a_class() -> None:
+    spec = inspect_source(CLASS_SCRIPT)
+    assert spec.class_name == "Tracker"
+    assert spec.name == "From a class"
+    assert spec.sync == "async"
+    assert [p.name for p in spec.params] == ["threshold"]
+    assert spec.has_setup
+    # inherited no-ops do not count as implemented
+    assert not spec.has_after_base
+    assert not spec.has_teardown
+
+
+def test_class_name_is_the_default_name() -> None:
+    spec = inspect_source(
+        "API_VERSION = 1\nclass Thing:\n    def analyze(self, i, f, c): ...\n"
+    )
+    assert spec.name == "Thing"
+    assert spec.class_name == "Thing"
+
+
+def test_class_method_signature_is_checked() -> None:
+    with pytest.raises(ScriptError, match=r"\(self, image, frame, ctx\)"):
+        inspect_source("API_VERSION = 1\nclass T:\n    def analyze(self, image): ...\n")
+
+
+def test_functions_and_a_class_together_are_refused() -> None:
+    with pytest.raises(ScriptError, match="both analyze"):
+        inspect_source(V + A + "class T:\n    def analyze(self, i, f, c): ...\n")
+
+
+def test_two_analyzer_classes_are_refused() -> None:
+    with pytest.raises(ScriptError, match="more than one analyzer class"):
+        inspect_source(
+            "API_VERSION = 1\n"
+            "class A1:\n    def analyze(self, i, f, c): ...\n"
+            "class A2:\n    def analyze(self, i, f, c): ...\n"
+        )
+
+
+def test_a_script_with_neither_is_refused() -> None:
+    with pytest.raises(ScriptError, match="must define analyze"):
+        inspect_source("API_VERSION = 1\nclass Unrelated:\n    pass\n")

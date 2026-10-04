@@ -53,6 +53,8 @@ class HostConfig:
 
     Last, so the positional order of the other fields is unchanged.
     """
+    class_name: str | None = None
+    """A class in the script to instantiate (no arguments) and take hooks from."""
 
 
 @dataclass
@@ -128,6 +130,10 @@ class _ScriptHost:
         sys.modules[self._module_name] = module
         exec(code, module.__dict__)
         self._module = module
+        if (class_name := self._config.class_name) is not None:
+            # The script defines a class rather than functions: one instance
+            # per run, so its attributes are this run's state.
+            self._analyzer = getattr(module, class_name)()
 
     def _hook(self, name: str) -> Callable[..., Any] | None:
         """The named hook: a method of the analysis object, or a module function."""

@@ -134,12 +134,20 @@ runner thread ── sequenceFinished (direct) ─▶ _finalize → finalizer th
     another thread). It goes through the same `normalise_response` ->
     `_queue` -> `iterator.inject` path as a hook's response, tagged
     `origin="external"` with no `parent_frame_id`.
-13. **The analysis can be an object instead of a file.** `inspect_analyzer`
-    builds a `ScriptSpec` from an object's attributes (so `ScriptSpec.path`
-    and `.source` are optional, and `.analyzer` holds the object), and
-    `_ScriptHost` then takes its hooks from that object instead of compiling
-    a module. Everything downstream is unchanged. In process mode the object
-    travels inside `HostConfig`, so it must be picklable.
+13. **Hooks may be functions or methods; delivered as a file or an object.**
+    Four combinations, one code path. `inspect_analyzer` builds a
+    `ScriptSpec` from a live object's attributes (so `ScriptSpec.path` and
+    `.source` are optional and `.analyzer` holds it); `inspect_source`
+    detects a single top-level class defining `analyze` and records
+    `class_name`, reading the constants from the class body and checking the
+    method signatures with an extra `self`. `_ScriptHost` then either
+    compiles the module and instantiates that class (one instance per run),
+    or takes the hooks from the object it was given. In process mode an
+    object travels inside `HostConfig`, so it must be picklable.
+    `SmartAnalyzer` supplies no-op optional hooks, so `implemented_hooks`
+    compares against the base to tell a real override from an inherited
+    default -- otherwise every run would make a pointless `after_base`
+    round-trip.
 14. **Status reporting:** a run's status comes from the runner's own flags
     first (`user_cancelled`, `iterator.stop_reason`), then from
     `core.mda.status.finish_reason`. A cancel from elsewhere can end the

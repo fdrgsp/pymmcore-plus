@@ -29,6 +29,7 @@ from pymmcore_plus.smart._api import (
     Origin,
     SequencingMode,
     SyncMode,
+    implemented_hooks,
 )
 
 if TYPE_CHECKING:
@@ -152,6 +153,8 @@ class ScriptSpec:
     has_setup: bool
     has_teardown: bool
     has_after_base: bool = False
+    class_name: str | None = None
+    """Name of the analyzer class to instantiate, when the script defines one."""
     analyzer: Any = None
     """The analysis object, when this does not come from a script file."""
 
@@ -188,6 +191,7 @@ def inspect_analyzer(analyzer: Any) -> ScriptSpec:
             f"{type(analyzer).__name__} has no callable analyze(image, frame, ctx)."
         )
     get = partial(getattr, analyzer)
+    hooks = implemented_hooks(analyzer)
     name = str(get("NAME", None) or type(analyzer).__name__)
     constants = {
         key: (value, None)
@@ -217,9 +221,9 @@ def inspect_analyzer(analyzer: Any) -> ScriptSpec:
         ),
         filter=_read_filter({"ANALYZE": (get("ANALYZE", {}) or {}, None)}),
         params=_read_params({"PARAMETERS": (get("PARAMETERS", {}) or {}, None)}),
-        has_setup=callable(get("setup", None)),
-        has_teardown=callable(get("teardown", None)),
-        has_after_base=callable(get("after_base", None)),
+        has_setup="setup" in hooks,
+        has_teardown="teardown" in hooks,
+        has_after_base="after_base" in hooks,
         analyzer=analyzer,
     )
 
@@ -249,10 +253,27 @@ def inspect_source(
     except SyntaxError as e:
         raise ScriptError(f"Syntax error: {e.msg}", e.lineno) from e
 
+    # The hooks may be module-level functions, or the methods of a single
+    # class (which the runner instantiates); settings then live on that class.
     constants = _read_constants(tree)
     hooks = _read_hooks(tree)
-    if "analyze" not in hooks:
-        raise ScriptError("The script must define analyze(image, frame, ctx).")
+    cls = _analyzer_class(tree)
+    class_name: str | None = None
+    if cls is not None:
+        if "analyze" in hooks:
+            raise ScriptError(
+                f"The script defines both analyze() and the class {cls.name}; "
+                "keep one of them.",
+                cls.lineno,
+            )
+        class_name = cls.name
+        hooks = _read_hooks(cls, method=True)
+        constants = {**constants, **_read_constants(cls)}
+    elif "analyze" not in hooks:
+        raise ScriptError(
+            "The script must define analyze(image, frame, ctx), or a class with "
+            "an analyze(self, image, frame, ctx) method."
+        )
 
     if "API_VERSION" not in constants:
         raise ScriptError(f"The script must declare API_VERSION = {API_VERSION}.")
@@ -263,7 +284,11 @@ def inspect_source(
             line,
         )
 
-    name = _str_constant(constants, "NAME") or (path.stem if path else "script")
+    name = (
+        _str_constant(constants, "NAME")
+        or class_name
+        or (path.stem if path else "script")
+    )
     execution = _choice_constant(constants, "EXECUTION", EXECUTION_MODES, "thread")
     sync = _choice_constant(constants, "SYNC", SYNC_MODES, "blocking")
     sequencing = _choice_constant(constants, "SEQUENCING", SEQUENCING_MODES, "safe")
@@ -282,13 +307,14 @@ def inspect_source(
         has_setup="setup" in hooks,
         has_teardown="teardown" in hooks,
         has_after_base="after_base" in hooks,
+        class_name=class_name,
     )
 
 
 # ---------------------------------------------------------------- internals
 
 
-def _read_constants(tree: ast.Module) -> dict[str, tuple[Any, int]]:
+def _read_constants(tree: ast.Module | ast.ClassDef) -> dict[str, tuple[Any, int]]:
     """Literal values of the known module-level constants, with their line."""
     found: dict[str, tuple[Any, int]] = {}
     for node in tree.body:
@@ -311,8 +337,34 @@ def _read_constants(tree: ast.Module) -> dict[str, tuple[Any, int]]:
     return found
 
 
-def _read_hooks(tree: ast.Module) -> set[str]:
+def _analyzer_class(tree: ast.Module) -> ast.ClassDef | None:
+    """The single top-level class defining ``analyze``, if the script has one."""
+    found = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and any(
+            isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and m.name == "analyze"
+            for m in node.body
+        )
+    ]
+    if len(found) > 1:
+        raise ScriptError(
+            "The script defines more than one analyzer class "
+            f"({', '.join(c.name for c in found)}); keep one.",
+            found[1].lineno,
+        )
+    return found[0] if found else None
+
+
+def _read_hooks(tree: ast.Module | ast.ClassDef, *, method: bool = False) -> set[str]:
+    """Hook names defined directly in *tree*, checking each signature.
+
+    With *method*, the hooks are methods, so each takes ``self`` as well.
+    """
     hooks: set[str] = set()
+    offset = 1 if method else 0
     for node in tree.body:
         if isinstance(node, ast.AsyncFunctionDef) and node.name in _HOOKS:
             raise ScriptError(
@@ -320,12 +372,13 @@ def _read_hooks(tree: ast.Module) -> set[str]:
             )
         if not isinstance(node, ast.FunctionDef) or node.name not in _HOOKS:
             continue
-        expected = _HOOKS[node.name]
+        expected = _HOOKS[node.name] + offset
         args = node.args
         positional = len(args.posonlyargs) + len(args.args)
         required = positional - len(args.defaults)
         if not (required <= expected <= positional or args.vararg is not None):
-            signature = "(image, frame, ctx)" if node.name == "analyze" else "(ctx)"
+            args_text = "image, frame, ctx" if node.name == "analyze" else "ctx"
+            signature = f"({'self, ' if method else ''}{args_text})"
             raise ScriptError(
                 f"{node.name}{signature} must accept exactly {expected} positional "
                 f"argument{'s' if expected > 1 else ''}.",

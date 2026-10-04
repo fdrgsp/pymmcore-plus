@@ -957,3 +957,83 @@ def test_dry_run_accepts_an_object(core: CMMCorePlus) -> None:
     result = dry_run(Tracker(n_frames=99), core.getImage(), core=core)
     assert result.ok, result.error
     assert result.records["seen"] == 1
+
+
+CLASS_SCRIPT = """
+import useq
+from pymmcore_plus.smart import STOP, SmartAnalyzer
+
+API_VERSION = 1
+
+
+class Counter(SmartAnalyzer):
+    NAME = "Counter"
+    PARAMETERS = {"n_frames": 3}
+
+    def __init__(self):
+        self.seen = 0
+
+    def setup(self, ctx):
+        ctx.log("ready")
+
+    def analyze(self, image, frame, ctx):
+        self.seen += 1          # state on self, across frames of one run
+        ctx.record(seen=self.seen, where=ctx.execution)
+        return STOP if self.seen >= ctx.params["n_frames"] else useq.MDAEvent()
+"""
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_script_may_define_a_class(
+    core: CMMCorePlus, tmp_path: Path, mode: str
+) -> None:
+    script = _script(tmp_path, CLASS_SCRIPT)
+    logs: list[str] = []
+    runner = SmartRunner(core)
+    runner.events.logMessage.connect(lambda _lvl, msg: logs.append(msg))
+    summary = runner.run(
+        ONE,
+        script,
+        output="memory",
+        run_dir=tmp_path / "run",
+        execution=mode,
+        params={"n_frames": 4},
+        timeout=60,
+    )
+    assert summary is not None
+    assert summary["status"] == "stopped_by_script"
+    assert summary["frames"] == 4
+    assert "ready" in logs  # the overridden setup ran
+    analysed = [
+        a for a in _lines(tmp_path / "run" / "analysis.jsonl") if a["call"] == "analyze"
+    ]
+    # the instance persisted across frames
+    assert [a["records"]["seen"] for a in analysed] == [1, 2, 3, 4]
+    assert {a["records"]["where"] for a in analysed} == {mode}
+    # an inherited no-op after_base is not treated as implemented, so the run
+    # ends without a pointless worker round-trip
+    assert not [
+        a
+        for a in _lines(tmp_path / "run" / "analysis.jsonl")
+        if a["call"] == "after_base"
+    ]
+
+
+def test_each_run_gets_a_fresh_instance(core: CMMCorePlus, tmp_path: Path) -> None:
+    script = _script(tmp_path, CLASS_SCRIPT)
+    for _ in range(2):
+        runner = SmartRunner(core)
+        summary = runner.run(
+            ONE, script, output="memory", params={"n_frames": 2}, timeout=60
+        )
+        assert summary is not None and summary["frames"] == 2
+
+
+def test_base_class_rejects_a_missing_analyze() -> None:
+    from pymmcore_plus.smart import SmartAnalyzer
+
+    class Incomplete(SmartAnalyzer):  # type: ignore[abstract]
+        pass
+
+    with pytest.raises(TypeError, match="abstract"):
+        Incomplete()  # type: ignore[abstract]

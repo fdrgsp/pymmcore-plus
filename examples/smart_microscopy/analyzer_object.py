@@ -4,6 +4,10 @@ Instead of module-level hooks and ``__file__``, the hooks are methods on an
 object: the run's state lives on ``self``, its settings are ``__init__``
 arguments, and the class can be imported and unit-tested like any other.
 
+The very same class can live in a script file handed to a front end (see
+``class_script.py``); there the runner creates the instance, and its
+``PARAMETERS`` fill ``ctx.params``.
+
 Pass an *instance* to the runner::
 
     core.run_smart(sequence, AdaptiveExposure(target_mean=2000))
@@ -27,14 +31,25 @@ import numpy as np
 import useq
 
 from pymmcore_plus import CMMCorePlus
-from pymmcore_plus.smart import STOP, AnalysisContext, FrameInfo, Response
+from pymmcore_plus.smart import (
+    STOP,
+    AnalysisContext,
+    FrameInfo,
+    Response,
+    SmartAnalyzer,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
-class AdaptiveExposure:
-    """Keeps the mean intensity near a target, and remembers what it saw."""
+class AdaptiveExposure(SmartAnalyzer):
+    """Keeps the mean intensity near a target, and remembers what it saw.
+
+    Subclassing `SmartAnalyzer` is optional -- any object with an ``analyze``
+    method works -- but it supplies the hook signatures and no-op defaults for
+    the hooks this class does not need.
+    """
 
     NAME = "Adaptive exposure (object)"
     SYNC = "blocking"  # each frame's analysis decides the next one
