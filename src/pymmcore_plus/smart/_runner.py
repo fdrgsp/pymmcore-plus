@@ -66,9 +66,9 @@ from pymmcore_plus.smart._worker import HostConfig
 if TYPE_CHECKING:
     from collections.abc import Callable
     from concurrent.futures import Future
+    from typing import Self
 
     import numpy as np
-    from typing_extensions import Self
 
     from pymmcore_plus import CMMCorePlus
     from pymmcore_plus.mda import SingleOutput

@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import tempfile
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, TextIO
@@ -33,7 +33,7 @@ _OME_SUFFIXES: Final = (".ome.zarr", ".ome.tiff", ".ome.tif", ".zarr", ".tiff", 
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec="milliseconds")
+    return datetime.now(UTC).astimezone().isoformat(timespec="milliseconds")
 
 
 def data_path_for_output(output: object) -> Path | None:

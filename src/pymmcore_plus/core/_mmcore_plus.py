@@ -50,11 +50,16 @@ from .events import CMMCoreSignaler, PCoreSignaler, _get_auto_core_callback_clas
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence
-    from typing import Literal, TypeAlias, TypedDict
+    from typing import (
+        Literal,
+        Never,
+        TypeAlias,
+        TypedDict,
+    )
 
     import numpy as np
     from pymmcore import DeviceLabel
-    from typing_extensions import Never, Unpack  # py311
+    from typing_extensions import Unpack
     from useq import MDAEvent, MDASequence
 
     from pymmcore_plus.mda._runner import DimensionOverride, SingleOutput
@@ -2089,7 +2094,9 @@ class CMMCorePlus(pymmcore.CMMCore):
         if len(args) == 2:
             shutterLabel, state = args
         elif len(args) == 1:
-            shutterLabel = super().getShutterDevice()
+            # use self (not super) so subclasses that override getShutterDevice
+            # (e.g. UniMMCore, for Python shutters) are respected
+            shutterLabel = self.getShutterDevice()
             state = args[0]
         self._do_shutter_open(shutterLabel, state)
         state = str(int(bool(state)))

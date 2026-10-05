@@ -6,7 +6,7 @@ import types
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 from unittest.mock import MagicMock
@@ -124,7 +124,7 @@ class SkipEvent(Exception):
         super().__init__(msg)
 
 
-class RunState(str, Enum):
+class RunState(StrEnum):
     """State of the MDA acquisition runner."""
 
     IDLE = "idle"
@@ -138,7 +138,7 @@ class RunState(str, Enum):
         return self.value
 
 
-class FinishReason(str, Enum):
+class FinishReason(StrEnum):
     """Reason why an MDA sequence finished."""
 
     COMPLETED = "completed"
