@@ -10,10 +10,17 @@ from typing import TYPE_CHECKING, Literal, NamedTuple, cast
 
 import numpy as np
 import useq
-from useq import AcquireImage, HardwareAutofocus, MDAEvent, MDASequence
+from useq import (
+    AcquireImage,
+    HardwareAutofocus,
+    MDAEvent,
+    MDASequence,
+    SoftwareAutofocus,
+)
 
 from pymmcore_plus._logger import logger
 from pymmcore_plus._util import retry
+from pymmcore_plus.autofocus import AutofocusCancelled, AutofocusResult, get_method
 from pymmcore_plus.core._constants import DeviceType, FocusDirection, Keyword
 from pymmcore_plus.core._sequencing import SequencedEvent, iter_sequenced_events
 from pymmcore_plus.metadata import (
@@ -25,6 +32,7 @@ from pymmcore_plus.metadata import (
 )
 
 from ._protocol import PMDAEngine
+from ._runner import RunState
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
@@ -144,6 +152,9 @@ class MDAEngine(PMDAEngine):
         self._af_was_engaged: bool = False
         # used to store the success of the last _execute_autofocus call
         self._af_succeeded: bool = False
+        # the result of the most recent autofocus event (hardware or software),
+        # also emitted on the `autofocusFinished` signal.
+        self.last_autofocus_result: AutofocusResult | None = None
         # set to True right after a successful autofocus action (if it was engaged
         # at the start of the sequence); consumed (and reset to False) the next time
         # we re-engage continuous focus, so we only do so once per autofocus action
@@ -317,25 +328,11 @@ class MDAEngine(PMDAEngine):
         action = getattr(event, "action", None)
         core = self.mmcore
         if isinstance(action, HardwareAutofocus):
-            # skip if no autofocus device is found
-            if not core.getAutoFocusDevice():
-                logger.warning("No autofocus device found. Cannot execute autofocus.")
-                return
+            self._exec_hardware_autofocus(event, action)
+            return
 
-            try:
-                # execute hardware autofocus
-                new_correction = self._execute_autofocus(action)
-                self._af_succeeded = True
-                self._af_needs_reengage = self._af_was_engaged
-            except RuntimeError as e:
-                logger.warning("Hardware autofocus failed. %s", e)
-                self._af_succeeded = False
-            else:
-                # store correction for this position index
-                p_idx = event.index.get("p", None)
-                self._z_correction[p_idx] = new_correction + self._z_correction.get(
-                    p_idx, 0.0
-                )
+        if isinstance(action, SoftwareAutofocus):
+            self._exec_software_autofocus(event, action)
             return
 
         # don't try to execute any other action types. Mostly, this is just
@@ -963,10 +960,170 @@ class MDAEngine(PMDAEngine):
 
     # ===================== EXTRA =====================
 
+    def _exec_hardware_autofocus(
+        self, event: MDAEvent, action: HardwareAutofocus
+    ) -> None:
+        """Run hardware autofocus for `event`, update state, and report the result."""
+        core = self.mmcore
+        # skip if no autofocus device is found
+        if not (af_device := core.getAutoFocusDevice()):
+            logger.warning("No autofocus device found. Cannot execute autofocus.")
+            return
+
+        z_before = self._current_z()
+        message = ""
+        try:
+            # execute hardware autofocus
+            new_correction = self._execute_autofocus(action)
+            self._af_succeeded = True
+            self._af_needs_reengage = self._af_was_engaged
+        except RuntimeError as e:
+            message = str(e)
+            logger.warning(
+                "Hardware autofocus failed at position %r (z=%r). %s",
+                event.index.get("p"),
+                z_before,
+                e,
+            )
+            self._af_succeeded = False
+        else:
+            # store correction for this position index
+            p_idx = event.index.get("p", None)
+            self._z_correction[p_idx] = new_correction + self._z_correction.get(
+                p_idx, 0.0
+            )
+
+        self._emit_autofocus_finished(
+            event,
+            AutofocusResult(
+                kind="hardware",
+                method=af_device,
+                focus_device=core.getFocusDevice(),
+                z_before=z_before,
+                z_after=self._current_z(),
+                succeeded=self._af_succeeded,
+                message=message,
+            ),
+        )
+
+    def _exec_software_autofocus(
+        self, event: MDAEvent, action: SoftwareAutofocus
+    ) -> None:
+        """Run an image-based autofocus routine for `event`, and report the result."""
+        core = self.mmcore
+        try:
+            method = get_method(action.method)
+        except KeyError as e:
+            logger.warning("Cannot execute software autofocus. %s", e)
+            return
+
+        if not (drive := action.focus_device or core.getFocusDevice()):
+            logger.warning("No focus device found. Cannot execute autofocus.")
+            return
+
+        # A hardware autofocus holding the focus would fight the routine for the
+        # stage, so switch it off -- and leave it off: re-engaging would pull the
+        # focus straight back off the position the routine just measured. Routines
+        # that drive the autofocus device themselves opt out.
+        if not method.manages_continuous_focus and core.isContinuousFocusLocked():
+            core.enableContinuousFocus(False)
+
+        z_before = self._current_z()
+        result: AutofocusResult | None = None
+        message = ""
+        for attempt in range(1, max(action.max_retries, 1) + 1):
+            try:
+                result = method.run(
+                    core,
+                    drive,
+                    dict(action.settings),
+                    should_cancel=self._should_cancel,
+                )
+            except AutofocusCancelled:
+                raise
+            except Exception as e:
+                message = str(e)
+                logger.warning(
+                    "Software autofocus %r failed (attempt %d). %s",
+                    action.method,
+                    attempt,
+                    e,
+                )
+                continue
+            if result.succeeded:
+                break
+            message = result.message
+
+        self._af_succeeded = bool(result and result.succeeded)
+        if result is None:
+            result = AutofocusResult(
+                kind="software",
+                method=action.method,
+                focus_device=drive,
+                z_before=z_before,
+                z_after=self._current_z(),
+                succeeded=False,
+                message=message,
+            )
+
+        if self._af_succeeded:
+            # Only the focus device the z plan uses can be corrected: a routine that
+            # moved some other stage (a piezo, say) has already left it where it
+            # belongs, and applying its shift to the z plan would double the move.
+            if drive == core.getFocusDevice():
+                p_idx = event.index.get("p", None)
+                delta = result.z_after - result.z_before
+                self._z_correction[p_idx] = delta + self._z_correction.get(p_idx, 0.0)
+        else:
+            logger.warning(
+                "Software autofocus %r found no focus at position %r. %s",
+                action.method,
+                event.index.get("p"),
+                result.message,
+            )
+
+        self._emit_autofocus_finished(event, result)
+
+    def _emit_autofocus_finished(
+        self, event: MDAEvent, result: AutofocusResult
+    ) -> None:
+        """Emit `autofocusFinished`, without letting a listener break acquisition."""
+        self.last_autofocus_result = result
+        try:
+            self.mmcore.mda.events.autofocusFinished.emit(event, result)
+        except Exception as e:  # pragma: no cover
+            logger.warning("Error emitting autofocusFinished. %s", e)
+
+    def _current_z(self) -> float:
+        """Return the focus device position, or `nan` if it cannot be read."""
+        try:
+            return self.mmcore.getZPosition()
+        except Exception:
+            return float("nan")
+
+    def _should_cancel(self) -> bool:
+        """Return True if the running acquisition has been asked to stop.
+
+        Returns False when no acquisition is running, so that routines driven directly
+        (rather than by the runner) are not treated as cancelled.
+        """
+        try:
+            status = self.mmcore.mda.status
+        except Exception:  # pragma: no cover
+            return False
+        return bool(status.cancel_requested) or status.phase == RunState.FINISHING
+
     def _execute_autofocus(self, action: HardwareAutofocus) -> float:
         """Perform the hardware autofocus.
 
         Returns the change in ZPosition that occurred during the autofocus event.
+
+        If `fullFocus` fails at the current position and the action requests a search
+        range, the focus device is stepped through that range, retrying at each
+        position: hardware autofocus devices can only lock within a limited range, so a
+        large move (a new well, a tilted sample, drift) can leave the sample outside of
+        it.  If nothing locks, the focus device is returned to where it started and the
+        last error is raised.
         """
         core = self.mmcore
         # switch off autofocus device if it is on
@@ -983,12 +1140,51 @@ class MDAEngine(PMDAEngine):
             core.waitForSystem()
 
         @retry(exceptions=RuntimeError, tries=action.max_retries, logger=logger.warning)
-        def _perform_full_focus(previous_z: float) -> float:
+        def _perform_full_focus() -> None:
             core.fullFocus()
             core.waitForSystem()
-            return core.getZPosition() - previous_z
 
-        return _perform_full_focus(core.getZPosition())
+        z_before = core.getZPosition()
+        try:
+            _perform_full_focus()
+        except RuntimeError:
+            if not self._search_for_focus(action, z_before, _perform_full_focus):
+                # leave the stage where we found it before re-raising
+                with suppress(Exception):
+                    core.setZPosition(z_before)
+                    core.waitForSystem()
+                raise
+
+        return core.getZPosition() - z_before
+
+    def _search_for_focus(
+        self,
+        action: HardwareAutofocus,
+        z_before: float,
+        attempt_focus: Callable[[], None],
+    ) -> bool:
+        """Step the focus device through the search range, retrying autofocus.
+
+        Searches *below* `z_before` first, then above, as MMStudio's
+        HardwareFocusExtender does.  Returns True as soon as autofocus succeeds.
+        """
+        core = self.mmcore
+        for z in _focus_search_positions(z_before, action):
+            if self._should_cancel():
+                return False
+            try:
+                core.setZPosition(z)
+                core.waitForSystem()
+            except RuntimeError as e:  # pragma: no cover
+                logger.warning("Failed to set Z position to %r. %s", z, e)
+                return False
+            logger.debug("Retrying hardware autofocus at z=%r", z)
+            try:
+                attempt_focus()
+            except RuntimeError:
+                continue
+            return True
+        return False
 
     def _set_event_xy_position(self, event: MDAEvent) -> None:
         event_x, event_y = event.x_pos, event.y_pos
@@ -1175,6 +1371,25 @@ class ImagePayload(NamedTuple):
     image: NDArray
     event: MDAEvent
     metadata: FrameMetaV1 | SummaryMetaV1
+
+
+def _focus_search_positions(
+    z_before: float, action: HardwareAutofocus
+) -> Iterator[float]:
+    """Yield the positions to try when hardware autofocus cannot lock.
+
+    Below `z_before` first, then above, in `search_step_um` increments, out to (and
+    including) each requested limit.  `z_before` itself is not yielded: it has already
+    been tried.
+    """
+    if (step := action.search_step_um) <= 0:  # pragma: no cover
+        return  # guarded by useq validation, but never divide by zero
+    for distance, direction in (
+        (action.search_below_um, -1.0),
+        (action.search_above_um, 1.0),
+    ):
+        for i in range(1, int(distance // step) + 1):
+            yield z_before + direction * i * step
 
 
 @cache

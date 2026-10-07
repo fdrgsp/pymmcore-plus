@@ -33,3 +33,9 @@ class PMDASignaler(Protocol):
     """  # noqa: E501
     eventStarted: ClassVar[PSignal]
     """Emits `(event: MDAEvent)` immediately before event setup and execution."""
+    autofocusFinished: ClassVar[PSignal]
+    """Emits `(event: MDAEvent, result: AutofocusResult)` after an autofocus event.
+
+    Emitted for both hardware and software autofocus, whether or not focus was found
+    (check [`AutofocusResult.succeeded`][pymmcore_plus.autofocus.AutofocusResult]).
+    """

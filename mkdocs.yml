@@ -36,6 +36,7 @@ nav:
           - api/cmmcoreplus.md
           - api/mda.md
           - api/smart.md
+          - api/autofocus.md
           - api/events.md
           - api/device.md
           - api/configuration.md
