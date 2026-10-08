@@ -265,3 +265,37 @@ def test_methods_are_ordered_most_useful_first() -> None:
     assert methods[0] == "oughtafocus"
     # duo runs two routines, so it costs the most images: last
     assert methods[-1] == "duo"
+
+
+def test_duo_can_chain_two_different_routines(
+    core: pymmcore_plus.CMMCorePlus, focus_sim: float
+) -> None:
+    """Picking the two steps is the point of it, so a mixed pair must work."""
+    core.setZPosition(12.0)
+    result = run_software_autofocus(
+        core,
+        "duo",
+        {
+            "second": {
+                "method": "jaf",
+                "settings": {"fine_step_um": 0.5, "settle_ms": 0},
+            }
+        },
+    )
+    assert result.succeeded, result.message
+    assert result.z_after == pytest.approx(focus_sim, abs=2.0)
+
+
+def test_duo_inside_duo_terminates(
+    core: pymmcore_plus.CMMCorePlus, focus_sim: float
+) -> None:
+    """Nesting it is wasteful but bounded, since a nested step takes its defaults.
+
+    Worth pinning: a routine that can run other routines is the one place where an
+    acquisition could be made to recurse. The GUI does not offer `duo` as a step of
+    itself, and nothing here needs to guard against it either.
+    """
+    core.setZPosition(14.0)
+    result = run_software_autofocus(core, "duo", {"first": {"method": "duo"}})
+    assert result.succeeded, result.message
+    assert result.z_after == pytest.approx(focus_sim, abs=2.0)

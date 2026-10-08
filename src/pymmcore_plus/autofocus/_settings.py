@@ -62,9 +62,9 @@ class OughtaFocusSettings:
         How to measure sharpness.  By default, `ScoringMethod.EDGES`.
     fft_lower_pct, fft_upper_pct : float
         The frequency band, for `ScoringMethod.FFT_BANDPASS` only.
-    channel, channel_group : str | None
-        A config preset to focus in, e.g. a brightfield channel.  `None` uses
-        whatever is currently set.
+    channel_group, channel : str | None
+        A config group and one of its presets to focus in, e.g. a brightfield
+        channel.  `None` uses whatever is currently set.
     exposure_ms : float | None
         Exposure while focusing.  `None` keeps the current exposure.
     crop_factor : float
@@ -81,8 +81,8 @@ class OughtaFocusSettings:
     scoring: ScoringMethod = ScoringMethod.EDGES
     fft_lower_pct: float = 2.5
     fft_upper_pct: float = 14.0
-    channel: str | None = None
     channel_group: str | None = None
+    channel: str | None = None
     exposure_ms: float | None = None
     crop_factor: float = 1.0
     keep_shutter_open: bool = False
@@ -136,8 +136,9 @@ class JAFSettings:
         seen.  By default, 0.02.
     crop_ratio : float
         Fraction of the frame to score, centred.  By default, 0.2.
-    channel, channel_group : str | None
-        A config preset to focus in.  `None` keeps the current one.
+    channel_group, channel : str | None
+        A config group and one of its presets to focus in.  `None` keeps the
+        current one.
     fine_channel : str | None
         A different preset for the fine pass, e.g. a fluorescence channel once the
         coarse pass has found the sample in brightfield.  `None` keeps using
@@ -154,8 +155,8 @@ class JAFSettings:
     fine_steps: int = 5
     threshold: float = 0.02
     crop_ratio: float = 0.2
-    channel: str | None = None
     channel_group: str | None = None
+    channel: str | None = None
     fine_channel: str | None = None
     exposure_ms: float | None = None
     settle_ms: float = 100.0
