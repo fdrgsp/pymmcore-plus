@@ -231,7 +231,7 @@ def test_cancelling_a_run_mid_autofocus_is_not_an_error(
     from pymmcore_plus.autofocus import AutofocusCancelled
     from pymmcore_plus.mda import FinishReason
 
-    def _cancels(core, focus_device, settings=None, *, should_cancel=None):  # noqa: ANN001
+    def _cancels(core, focus_device, settings=None, *, should_cancel=None):
         core.mda.cancel()  # as the user would, mid-autofocus
         raise AutofocusCancelled("Autofocus cancelled after 3 image(s).")
 
