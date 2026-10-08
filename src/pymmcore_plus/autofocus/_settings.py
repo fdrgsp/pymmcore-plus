@@ -197,11 +197,27 @@ class DuoSettings:
     Attributes
     ----------
     first, second : dict
-        Each is `{"method": <name>, "settings": {...}}`.
+        Each is `{"method": <name>, "settings": {...}}`.  They default to a wide
+        coarse scan followed by a narrow precise search, which is the arrangement
+        this routine exists for, so it is usable without being configured first.
     """
 
-    first: dict[str, Any] = field(default_factory=dict)
-    second: dict[str, Any] = field(default_factory=dict)
+    first: dict[str, Any] = field(
+        default_factory=lambda: {
+            "method": "oughtafocus",
+            "settings": {
+                "search_range_um": 50.0,
+                "optimizer": "zstack",
+                "tolerance_um": 5.0,
+            },
+        }
+    )
+    second: dict[str, Any] = field(
+        default_factory=lambda: {
+            "method": "oughtafocus",
+            "settings": {"search_range_um": 10.0, "tolerance_um": 0.5},
+        }
+    )
 
     def __post_init__(self) -> None:
         for name in ("first", "second"):

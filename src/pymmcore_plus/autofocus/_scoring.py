@@ -13,7 +13,7 @@ robust to noise but the slowest.
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -37,7 +37,7 @@ _DIAGONAL_NW = (0, 1, 2, -1, 0, 1, -2, -1, 0)
 _REDONDO = (0, 1, 0, -3, 0, 1, 0, 1, 0)
 
 
-class ScoringMethod(str, Enum):
+class ScoringMethod(StrEnum):
     """How to measure the sharpness of an image.
 
     Attributes

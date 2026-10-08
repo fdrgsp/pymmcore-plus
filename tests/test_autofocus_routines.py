@@ -247,3 +247,21 @@ def test_an_explicit_focus_device_is_used(
     )
     assert result.focus_device == drive
     assert result.succeeded
+
+
+def test_duo_works_without_being_configured(
+    core: pymmcore_plus.CMMCorePlus, focus_sim: float
+) -> None:
+    """Its defaults are the coarse-then-fine arrangement it exists for."""
+    core.setZPosition(10.0)
+    result = run_software_autofocus(core, "duo")
+    assert result.succeeded, result.message
+    assert result.z_after == pytest.approx(focus_sim, abs=1.5)
+
+
+def test_methods_are_ordered_most_useful_first() -> None:
+    """A GUI offering a choice takes the first as its default."""
+    methods = available_methods()
+    assert methods[0] == "oughtafocus"
+    # duo runs two routines, so it costs the most images: last
+    assert methods[-1] == "duo"

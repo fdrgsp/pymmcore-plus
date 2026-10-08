@@ -44,7 +44,9 @@ class SoftwareAutofocusMethod:
         The dataclass describing this routine's settings.  A GUI can build a form
         from `dataclasses.fields()` of it.
     description : str
-        One line on what the routine does, for a method picker.
+        How this routine finds focus, for a method picker to show. Several lines is
+        fine: the point is that someone choosing between routines can tell what
+        each will actually do, and what it will cost in images.
     manages_continuous_focus : bool
         True if the routine drives the hardware autofocus itself, in which case the
         engine must not switch continuous focus off before running it.
@@ -79,8 +81,13 @@ def register_software_autofocus(
 
 
 def available_methods() -> list[str]:
-    """Return the names of every registered routine, sorted."""
-    return sorted(_REGISTRY)
+    """Return the names of every registered routine, most generally useful first.
+
+    A caller offering a choice can take the first as a default: the order is
+    registration order, and the built-ins are registered from the one that works on
+    the widest range of samples to the one needing the most setting up.
+    """
+    return list(_REGISTRY)
 
 
 def get_method(name: str) -> SoftwareAutofocusMethod:
@@ -144,21 +151,50 @@ def run_software_autofocus(
     return entry.run(core, drive, settings, should_cancel=should_cancel)
 
 
+# Registered most generally useful first: `available_methods()` keeps this order, so
+# a method picker can take the first as its default.
 register_software_autofocus(
     "oughtafocus",
     oughtafocus,
     OughtaFocusSettings,
-    description="Search a Z range for the sharpest image.",
+    description=(
+        "Acquires images along Z and moves to the sharpest one.\n"
+        "\n"
+        "You choose how sharpness is measured, and how it searches: walking toward "
+        "the peak takes the fewest images but needs a single clear peak, while "
+        "scanning the whole range costs more images and survives noise.\n"
+        "\n"
+        "The general-purpose choice, and a good place to start."
+    ),
 )
 register_software_autofocus(
     "jaf",
     jaf,
     JAFSettings,
-    description="A coarse Z scan followed by a fine one, stopping early past the peak.",
+    description=(
+        "Scans Z coarsely to find roughly where focus is, then finely around that "
+        "point.\n"
+        "\n"
+        "Each pass walks outward and stops as soon as the image stops improving, so "
+        "it wastes few images past the peak. Sharpness is measured on a central crop "
+        "after a median filter, which makes it tolerant of noise and of a bright "
+        "edge of the frame. The fine pass can use a different channel.\n"
+        "\n"
+        "Reaches focus from further away than a single search of the same cost."
+    ),
 )
 register_software_autofocus(
     "duo",
     duo,
     DuoSettings,
-    description="Run two routines in sequence, e.g. a coarse one then a precise one.",
+    description=(
+        "Runs two routines one after the other, the second starting where the first "
+        "ended.\n"
+        "\n"
+        "By default a wide coarse scan followed by a narrow precise search, which "
+        "finds focus from further out than either manages alone -- at the cost of "
+        "both routines' images.\n"
+        "\n"
+        "Use it when focus can start far off, as after moving to a new well."
+    ),
 )
