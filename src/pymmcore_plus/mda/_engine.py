@@ -1039,8 +1039,14 @@ class MDAEngine(PMDAEngine):
                     dict(action.settings),
                     should_cancel=self._should_cancel,
                 )
-            except AutofocusCancelled:
-                raise
+            except AutofocusCancelled as e:
+                # The only thing that cancels autofocus here is the runner's own
+                # cancel request, which the runner acts on at the next event
+                # boundary. Letting this propagate would surface a user's cancel as
+                # a failed acquisition with a traceback.
+                logger.info("Software autofocus %r cancelled.", action.method)
+                message = str(e)
+                break
             except Exception as e:
                 message = str(e)
                 logger.warning(

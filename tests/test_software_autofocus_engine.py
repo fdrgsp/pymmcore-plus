@@ -217,3 +217,40 @@ def test_the_fake_is_not_left_registered(
     core: pymmcore_plus.CMMCorePlus,
 ) -> None:
     assert "fake" not in available_methods()
+
+
+def test_cancelling_a_run_mid_autofocus_is_not_an_error(
+    core: pymmcore_plus.CMMCorePlus,
+) -> None:
+    """Cancelling is a normal end to a run, not a failed acquisition.
+
+    The routine is told to stop through `should_cancel`, which it reports by raising
+    -- but that came from the runner's own cancel request, so letting it propagate
+    would end the run with a traceback instead of "canceled".
+    """
+    from pymmcore_plus.autofocus import AutofocusCancelled
+    from pymmcore_plus.mda import FinishReason
+
+    def _cancels(core, focus_device, settings=None, *, should_cancel=None):  # noqa: ANN001
+        core.mda.cancel()  # as the user would, mid-autofocus
+        raise AutofocusCancelled("Autofocus cancelled after 3 image(s).")
+
+    register_software_autofocus("cancels", _cancels, dict)
+    try:
+        results: list[AutofocusResult] = []
+        core.mda.events.autofocusFinished.connect(lambda e, r: results.append(r))
+        mda = useq.MDASequence(
+            stage_positions=[{"z": 0.0}],
+            time_plan={"interval": 0, "loops": 4},
+            autofocus_plan=_plan(method="cancels", axes=("t",)),
+        )
+        core.mda.run(mda)  # must return, not raise
+    finally:
+        from pymmcore_plus.autofocus import _registry
+
+        _registry._REGISTRY.pop("cancels", None)
+
+    assert core.mda.status.finish_reason == FinishReason.CANCELED
+    # and the cancellation is reported rather than silently swallowed
+    assert results and not results[0].succeeded
+    assert "cancelled" in results[0].message.lower()
