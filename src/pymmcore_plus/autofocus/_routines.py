@@ -137,7 +137,9 @@ def oughtafocus(
 
     try:
         with capture_state(core, cfg.capture()):
-            measure = _measurer(core, focus_device, score, cfg.settle_ms)
+            measure = _measurer(
+                core, focus_device, score, cfg.settle_ms, cfg.show_images
+            )
             if cfg.optimizer == "brent":
                 search = brent_search(
                     measure,
@@ -200,7 +202,9 @@ def jaf(
         )
         for channel, step, n_steps in passes:
             with capture_state(core, cfg.capture(channel)):
-                measure = _measurer(core, focus_device, score, cfg.settle_ms)
+                measure = _measurer(
+                    core, focus_device, score, cfg.settle_ms, cfg.show_images
+                )
                 best_z = _scan_pass(
                     measure,
                     best_z,

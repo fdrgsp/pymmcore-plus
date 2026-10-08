@@ -73,6 +73,11 @@ class OughtaFocusSettings:
         Hold the shutter open for the run rather than cycling it per image.
     settle_ms : float
         Wait this long after each Z move before acquiring.  By default, 0.0.
+    show_images : bool
+        Announce each autofocus image to the rest of the application, so a live
+        preview shows the search as it happens.  Off by default: these images are
+        diagnostic -- scored and discarded, never saved -- and a preview flickering
+        through them is rarely what is wanted.
     """
 
     search_range_um: float = 10.0
@@ -87,6 +92,7 @@ class OughtaFocusSettings:
     crop_factor: float = 1.0
     keep_shutter_open: bool = False
     settle_ms: float = 0.0
+    show_images: bool = False
 
     def __post_init__(self) -> None:
         if not self.search_range_um > 0:
@@ -147,6 +153,11 @@ class JAFSettings:
         Exposure while focusing.  `None` keeps the current exposure.
     settle_ms : float
         Wait this long after each Z move before acquiring.  By default, 100.0.
+    show_images : bool
+        Announce each autofocus image to the rest of the application, so a live
+        preview shows the search as it happens.  Off by default: these images are
+        diagnostic -- scored and discarded, never saved -- and a preview flickering
+        through them is rarely what is wanted.
     """
 
     coarse_step_um: float = 2.0
@@ -160,6 +171,7 @@ class JAFSettings:
     fine_channel: str | None = None
     exposure_ms: float | None = None
     settle_ms: float = 100.0
+    show_images: bool = False
 
     def __post_init__(self) -> None:
         for name in ("coarse_step_um", "fine_step_um"):

@@ -165,6 +165,55 @@ def test_capture_settings_are_restored(
     assert core.getExposure() == 100.0
 
 
+@pytest.mark.parametrize(("method", "settings"), METHODS)
+def test_show_images_decides_whether_the_search_is_visible(
+    core: pymmcore_plus.CMMCorePlus,
+    focus_sim: float,
+    method: str,
+    settings: dict,
+) -> None:
+    """Autofocus images are diagnostic, but a user may want to watch them."""
+    snapped: list[str] = []
+    core.events.imageSnapped.connect(snapped.append)
+
+    core.setZPosition(22.0)
+    assert run_software_autofocus(core, method, {**settings}).succeeded
+    # by default nothing hears about them, so a live preview does not flicker
+    assert snapped == []
+
+    core.setZPosition(22.0)
+    result = run_software_autofocus(core, method, {**settings, "show_images": True})
+    assert result.succeeded
+    assert len(snapped) == result.n_images
+
+
+def test_duo_passes_show_images_to_the_routine_it_runs(
+    core: pymmcore_plus.CMMCorePlus, focus_sim: float
+) -> None:
+    """`duo` has no cameras of its own: each step carries its own settings."""
+    snapped: list[str] = []
+    core.events.imageSnapped.connect(snapped.append)
+
+    core.setZPosition(22.0)
+    result = run_software_autofocus(
+        core,
+        "duo",
+        {
+            "first": {
+                "method": "oughtafocus",
+                "settings": {"search_range_um": 20.0, "show_images": True},
+            },
+            "second": {
+                "method": "oughtafocus",
+                "settings": {"search_range_um": 4.0},
+            },
+        },
+    )
+    assert result.succeeded
+    # only the first step was asked to show its images
+    assert 0 < len(snapped) < result.n_images
+
+
 def test_duo_runs_both_in_sequence(
     core: pymmcore_plus.CMMCorePlus, focus_sim: float
 ) -> None:
