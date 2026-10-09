@@ -30,6 +30,8 @@ repos:
         additional_dependencies:
           - pymmcore >=11.6.0.73.0
           - ome-writers >=0.3.2
-          - useq-schema >= 0.9.0
+          # the fork: the engine uses fields (hardware autofocus search, software
+          # autofocus) that only it has, so PyPI's useq makes these spurious errors
+          - useq-schema @ git+https://github.com/fdrgsp/useq-schema@cite
           - psygnal
           - typer
