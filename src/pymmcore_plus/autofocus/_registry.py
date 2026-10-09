@@ -8,12 +8,13 @@ here; anything else can be added with
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ._result import AutofocusResult
-from ._routines import duo, jaf, oughtafocus
-from ._settings import DuoSettings, JAFSettings, OughtaFocusSettings
+from ._routines import _restore, duo, jaf, oughtafocus
+from ._settings import DuoSettings, JAFSettings, OughtaFocusSettings, from_dict
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -148,7 +149,85 @@ def run_software_autofocus(
             succeeded=False,
             message="No focus device available.",
         )
-    return entry.run(core, drive, settings, should_cancel=should_cancel)
+    prepare_microscope(core, entry)
+    return run_guarded(entry, core, drive, settings, should_cancel=should_cancel)
+
+
+# --------------------------------------------------------------------------------
+# Shared with the MDA engine, so a routine run on its own -- from a settings
+# dialog's Test button, say -- runs under the same conditions as one an
+# acquisition runs, and is held to the same promises.
+
+
+def prepare_microscope(core: CMMCorePlus, entry: SoftwareAutofocusMethod) -> None:
+    """Put the microscope in the state a software routine needs.
+
+    - Live, or any other sequence acquisition, is stopped: a routine acquires its
+      own images one at a time, and cannot while the camera is streaming.
+    - A locked hardware autofocus is switched off -- and left off. It would fight
+      the routine for the stage, and re-engaging it afterwards would pull the focus
+      straight back off the position the routine just measured. Routines that
+      drive the autofocus device themselves opt out.
+    """
+    if core.isSequenceRunning():
+        core.stopSequenceAcquisition()
+    if not entry.manages_continuous_focus and core.isContinuousFocusLocked():
+        core.enableContinuousFocus(False)
+
+
+def settings_problem(entry: SoftwareAutofocusMethod, settings: Any) -> str:
+    """Why `settings` are not valid for `entry`, or "" if they are.
+
+    A configuration error will not fix itself by retrying, so a caller can report
+    it once, before anything moves. A routine registered with settings that are
+    not a dataclass is left to check its own.
+    """
+    if not dataclasses.is_dataclass(entry.settings_model):
+        return ""
+    try:
+        from_dict(entry.settings_model, settings)
+    except (TypeError, ValueError) as e:
+        return str(e)
+    return ""
+
+
+def run_guarded(
+    entry: SoftwareAutofocusMethod,
+    core: CMMCorePlus,
+    focus_device: str,
+    settings: Any,
+    *,
+    should_cancel: Callable[[], bool] | None = None,
+) -> AutofocusResult:
+    """Run `entry`, holding it to the promise every routine makes.
+
+    A routine that fails, raises or is cancelled leaves the focus device where it
+    found it. The built-ins keep that promise themselves, but every routine passes
+    through here -- ones registered by users too -- so it is enforced here as well.
+    It is also what lets an acquisition's retries each start from the same place,
+    rather than from wherever the last attempt gave up.
+
+    Only the stage is dealt with here: an exception is re-raised once it is back,
+    because what to make of one is the caller's business -- a mistake in the
+    settings should be loud when run by hand, and logged when run by an engine
+    that has an acquisition to carry on with.
+    """
+    z_before = core.getPosition(focus_device)
+
+    def put_back() -> None:
+        # only if it moved: a routine that failed before moving -- on a misspelt
+        # setting, say -- should not cost a stage move
+        if core.getPosition(focus_device) != z_before:
+            _restore(core, focus_device, z_before)
+
+    try:
+        result = entry.run(core, focus_device, settings, should_cancel=should_cancel)
+    except Exception:
+        put_back()
+        raise
+    if not result.succeeded:
+        put_back()
+    return result
 
 
 # Registered most generally useful first: `available_methods()` keeps this order, so

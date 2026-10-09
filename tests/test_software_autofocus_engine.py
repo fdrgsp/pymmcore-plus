@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ from pymmcore_plus.autofocus import (
     available_methods,
     register_software_autofocus,
 )
+from pymmcore_plus.autofocus._settings import from_dict
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -163,6 +165,73 @@ def test_a_failing_routine_is_retried_then_reported(
     assert len(results) == 1
     assert not results[0].succeeded
     assert "no contrast" in results[0].message
+
+
+def test_every_retry_starts_from_where_the_first_did(
+    core: pymmcore_plus.CMMCorePlus,
+) -> None:
+    """A routine that moves and then fails used to leave each retry starting from
+    wherever the last gave up, ratcheting the focus away -- 10, 20, 30 -- and the
+    frame was then acquired 30 um from where the run had put it."""
+    starts: list[float] = []
+
+    def climbs_then_fails(core, focus_device, settings=None, *, should_cancel=None):
+        starts.append(core.getPosition(focus_device))
+        core.setPosition(focus_device, starts[-1] + 10.0)
+        raise RuntimeError("lost it")
+
+    register_software_autofocus("climbs", climbs_then_fails, dict)
+    try:
+        core.setZPosition(10.0)
+        event = useq.MDAEvent(
+            action=useq.SoftwareAutofocus(method="climbs", max_retries=3)
+        )
+        list(core.mda.engine.exec_event(event))
+    finally:
+        from pymmcore_plus.autofocus import _registry
+
+        _registry._REGISTRY.pop("climbs", None)
+
+    assert starts == pytest.approx([10.0, 10.0, 10.0])
+    assert core.getZPosition() == pytest.approx(10.0)
+
+
+def test_a_setting_that_does_not_exist_is_reported_once_not_retried(
+    core: pymmcore_plus.CMMCorePlus,
+) -> None:
+    """It would fail every attempt the same way, and cannot fix itself."""
+
+    @dataclass(frozen=True)
+    class Settings:
+        range_um: float = 1.0
+
+    attempts = 0
+
+    def counted(core, focus_device, settings=None, *, should_cancel=None):
+        nonlocal attempts
+        attempts += 1
+        from_dict(Settings, settings)  # as every routine does, before moving
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    register_software_autofocus("counted", counted, Settings)
+    results: list[AutofocusResult] = []
+    core.mda.events.autofocusFinished.connect(lambda e, r: results.append(r))
+    try:
+        event = useq.MDAEvent(
+            action=useq.SoftwareAutofocus(
+                method="counted", settings={"range_umm": 5.0}, max_retries=3
+            )
+        )
+        list(core.mda.engine.exec_event(event))
+    finally:
+        from pymmcore_plus.autofocus import _registry
+
+        _registry._REGISTRY.pop("counted", None)
+
+    assert attempts == 0
+    assert len(results) == 1
+    assert not results[0].succeeded
+    assert "Unknown setting" in results[0].message
 
 
 def test_reports_the_focus_curve(

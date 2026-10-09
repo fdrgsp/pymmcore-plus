@@ -21,6 +21,11 @@ from useq import (
 from pymmcore_plus._logger import logger
 from pymmcore_plus._util import retry
 from pymmcore_plus.autofocus import AutofocusCancelled, AutofocusResult, get_method
+from pymmcore_plus.autofocus._registry import (
+    prepare_microscope,
+    run_guarded,
+    settings_problem,
+)
 from pymmcore_plus.core._constants import DeviceType, FocusDirection, Keyword
 from pymmcore_plus.core._sequencing import SequencedEvent, iter_sequenced_events
 from pymmcore_plus.metadata import (
@@ -1021,19 +1026,25 @@ class MDAEngine(PMDAEngine):
             logger.warning("No focus device found. Cannot execute autofocus.")
             return
 
-        # A hardware autofocus holding the focus would fight the routine for the
-        # stage, so switch it off -- and leave it off: re-engaging would pull the
-        # focus straight back off the position the routine just measured. Routines
-        # that drive the autofocus device themselves opt out.
-        if not method.manages_continuous_focus and core.isContinuousFocusLocked():
-            core.enableContinuousFocus(False)
+        # The same preparation a routine run on its own gets (live stopped, a
+        # locked hardware autofocus switched off), so the two cannot drift apart.
+        prepare_microscope(core, method)
 
         z_before = self._current_z()
         result: AutofocusResult | None = None
-        message = ""
-        for attempt in range(1, max(action.max_retries, 1) + 1):
+        attempts = max(action.max_retries, 1)
+        # A configuration error would fail every attempt identically: say so once,
+        # before anything moves.
+        if message := settings_problem(method, action.settings):
+            logger.warning("Software autofocus %r not run. %s", action.method, message)
+            attempts = 0
+        for attempt in range(1, attempts + 1):
+            # `run_guarded` puts the stage back after a failed attempt, so every
+            # retry starts from the same place rather than from wherever the last
+            # one gave up -- which would otherwise ratchet the focus away.
             try:
-                result = method.run(
+                result = run_guarded(
+                    method,
                     core,
                     drive,
                     dict(action.settings),
@@ -1048,7 +1059,8 @@ class MDAEngine(PMDAEngine):
                 message = str(e)
                 break
             except Exception as e:
-                message = str(e)
+                # an acquisition has the rest of its events to carry on with
+                result, message = None, str(e)
                 logger.warning(
                     "Software autofocus %r failed (attempt %d). %s",
                     action.method,
@@ -1059,6 +1071,12 @@ class MDAEngine(PMDAEngine):
             if result.succeeded:
                 break
             message = result.message
+            logger.warning(
+                "Software autofocus %r failed (attempt %d). %s",
+                action.method,
+                attempt,
+                message,
+            )
 
         self._af_succeeded = bool(result and result.succeeded)
         if result is None:

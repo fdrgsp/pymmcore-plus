@@ -118,6 +118,38 @@ def test_zstack_scans_symmetrically_including_both_ends() -> None:
     assert zs == pytest.approx([5.0, 7.5, 10.0, 12.5, 15.0])
 
 
+@pytest.mark.parametrize(
+    ("search_range_um", "step_um"),
+    [(10, 6), (10, 4), (10, 3), (20, 7), (0.3, 0.1), (10, 25)],
+)
+def test_zstack_never_leaves_its_range_whatever_the_step(
+    search_range_um: float, step_um: float
+) -> None:
+    """The range is a travel limit, not a suggestion.
+
+    Stepping out from the lower end used to land past the upper one whenever the
+    step did not divide the range -- 10 um at 6 um steps visited -5, 1 and 7 -- or
+    to stop short of it.
+    """
+    result = zstack_search(
+        _curve(), center=0.0, search_range_um=search_range_um, step_um=step_um
+    )
+    zs = np.array([z for z, _ in result.samples])
+    half = search_range_um / 2
+    # both ends, and nothing beyond them
+    assert zs.min() == pytest.approx(-half)
+    assert zs.max() == pytest.approx(half)
+    # evenly spaced, and never further apart than asked for
+    gaps = np.diff(zs)
+    assert gaps == pytest.approx(np.full_like(gaps, gaps[0]))
+    assert gaps.max() <= step_um + 1e-9
+
+
+def test_zstack_shrinks_the_step_rather_than_overshooting() -> None:
+    result = zstack_search(_curve(), center=0.0, search_range_um=10.0, step_um=6.0)
+    assert [z for z, _ in result.samples] == pytest.approx([-5.0, 0.0, 5.0])
+
+
 def test_zstack_beats_its_step_size() -> None:
     """Fitting the curve locates the peak to better than the sampling."""
     result = zstack_search(_curve(), center=10.0, search_range_um=30.0, step_um=3.0)

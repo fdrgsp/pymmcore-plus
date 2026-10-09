@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -11,10 +12,13 @@ import pytest
 from pymmcore_plus.autofocus import (
     AutofocusCancelled,
     AutofocusResult,
+    _registry,
     available_methods,
+    register_software_autofocus,
     run_software_autofocus,
     settings_model,
 )
+from pymmcore_plus.autofocus._routines import _scan_pass
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -348,3 +352,223 @@ def test_duo_inside_duo_terminates(
     result = run_software_autofocus(core, "duo", {"first": {"method": "duo"}})
     assert result.succeeded, result.message
     assert result.z_after == pytest.approx(focus_sim, abs=2.0)
+
+
+# ----------------------- a search that cannot have found focus -----------------------
+
+
+def _blank(*_a: Any, **_k: Any) -> np.ndarray:
+    return np.zeros((48, 48), dtype=np.uint16)
+
+
+@pytest.mark.parametrize(("method", "settings"), METHODS)
+def test_a_blank_image_is_not_mistaken_for_focus(
+    core: pymmcore_plus.CMMCorePlus, method: str, settings: dict
+) -> None:
+    """A lamp left off scores every position the same -- and a search still ends
+    *somewhere*, which used to be reported as focus and moved to."""
+    core.setZPosition(10.0)
+    with patch.object(core, "getImage", side_effect=_blank):
+        result = run_software_autofocus(core, method, settings)
+
+    assert not result.succeeded
+    assert "scored the same" in result.message
+    assert core.getZPosition() == pytest.approx(10.0)
+    assert result.z_after == pytest.approx(10.0)
+    assert result.n_images > 0  # the curve is still there, to look at
+
+
+def test_an_unscoreable_image_is_not_mistaken_for_focus(
+    core: pymmcore_plus.CMMCorePlus, focus_sim: float
+) -> None:
+    core.setZPosition(20.0)
+    with patch(
+        "pymmcore_plus.autofocus._routines.score_image", return_value=float("nan")
+    ):
+        result = run_software_autofocus(core, "oughtafocus", {"search_range_um": 6.0})
+    assert not result.succeeded
+    assert "not a number" in result.message
+    assert core.getZPosition() == pytest.approx(20.0)
+
+
+def test_a_search_that_did_not_converge_is_not_called_focus(
+    core: pymmcore_plus.CMMCorePlus, focus_sim: float
+) -> None:
+    from pymmcore_plus.autofocus import _routines
+
+    real = _routines.brent_search
+
+    def impatient(*args: Any, **kwargs: Any) -> Any:
+        return real(*args, **kwargs, max_evaluations=2)
+
+    core.setZPosition(20.0)
+    with patch.object(_routines, "brent_search", impatient):
+        result = run_software_autofocus(core, "oughtafocus", {"search_range_um": 20.0})
+    assert not result.succeeded
+    assert "Did not converge" in result.message
+    assert core.getZPosition() == pytest.approx(20.0)
+
+
+# ------------------------------- duo, end to end -------------------------------
+
+WIDE = {
+    "method": "oughtafocus",
+    "settings": {"search_range_um": 40.0, "optimizer": "zstack", "tolerance_um": 5.0},
+}
+
+
+def test_duo_puts_the_stage_back_when_cancelled_in_its_second_step(
+    core: pymmcore_plus.CMMCorePlus, focus_sim: float
+) -> None:
+    """The second step restores *its* start -- where the first left the stage."""
+    core.setZPosition(10.0)
+    images = 0
+
+    def cancel_once_the_first_step_is_done() -> bool:
+        nonlocal images
+        images += 1
+        return images > 9  # the first step's scan is 9 images
+
+    with pytest.raises(AutofocusCancelled):
+        run_software_autofocus(
+            core,
+            "duo",
+            {"first": WIDE, "second": {"method": "oughtafocus"}},
+            should_cancel=cancel_once_the_first_step_is_done,
+        )
+    assert core.getZPosition() == pytest.approx(10.0)
+
+
+@pytest.mark.parametrize(
+    ("second", "complaint"),
+    [
+        ({"method": "oughtafocuss"}, "second step: Unknown software autofocus"),
+        (
+            {"method": "oughtafocus", "settings": {"search_range_um": -1}},
+            "second step (oughtafocus): search_range_um must be positive",
+        ),
+    ],
+    ids=["unknown-routine", "invalid-settings"],
+)
+def test_duo_checks_both_steps_before_moving(
+    core: pymmcore_plus.CMMCorePlus,
+    focus_sim: float,
+    second: dict,
+    complaint: str,
+) -> None:
+    """A typo in the second step used to surface only after the first had moved."""
+    core.setZPosition(10.0)
+    with patch.object(core, "setPosition", wraps=core.setPosition) as move:
+        with pytest.raises((KeyError, ValueError), match=re.escape(complaint)):
+            run_software_autofocus(core, "duo", {"first": WIDE, "second": second})
+    move.assert_not_called()  # not moved and put back: never moved at all
+    assert core.getZPosition() == pytest.approx(10.0)
+
+
+# -------------------------- jaf: knowing when to stop --------------------------
+
+
+def _pass(curve: dict[int, float], *, full_scan: bool = False) -> tuple[float, int]:
+    samples: list[tuple[float, float]] = []
+    best = _scan_pass(
+        lambda z: curve[round(z)], 0.0, 1.0, 4, 0.02, samples, None, full_scan=full_scan
+    )
+    return best, len(samples)
+
+
+PEAK_AT_ZERO = {
+    -4: 1.0,
+    -3: 1.5,
+    -2: 2.5,
+    -1: 4.0,
+    0: 5.0,
+    1: 4.0,
+    2: 2.5,
+    3: 1.5,
+    4: 1.0,
+}
+
+
+def test_jaf_does_not_stop_at_a_dip_before_the_peak() -> None:
+    """One image falling below the best is not proof of having passed the peak --
+    least of all when no peak has been seen yet."""
+    curve = {**PEAK_AT_ZERO, -4: 1.0, -3: 0.8}
+    best, _ = _pass(curve)
+    assert best == 0.0
+
+
+def test_jaf_still_stops_early_once_clearly_past_the_peak() -> None:
+    best, images = _pass(PEAK_AT_ZERO)
+    assert best == 0.0
+    assert images == 7  # the peak, then two images falling away from it
+
+
+def test_jaf_full_scan_measures_every_position() -> None:
+    best, images = _pass(PEAK_AT_ZERO, full_scan=True)
+    assert best == 0.0
+    assert images == 9
+
+
+# ------------------ held to the same promises, however it is run ------------------
+
+
+def test_any_routine_puts_the_stage_back_when_it_raises(
+    core: pymmcore_plus.CMMCorePlus,
+) -> None:
+    """Including one registered by a user, which may not know it is meant to."""
+
+    def wanders_off(core, focus_device, settings=None, *, should_cancel=None):
+        core.setPosition(focus_device, 99.0)
+        raise RuntimeError("lost it")
+
+    register_software_autofocus("wanders_off", wanders_off, dict)
+    try:
+        core.setZPosition(10.0)
+        with pytest.raises(RuntimeError, match="lost it"):
+            run_software_autofocus(core, "wanders_off")
+        assert core.getZPosition() == pytest.approx(10.0)
+    finally:
+        _registry._REGISTRY.pop("wanders_off", None)
+
+
+def test_any_routine_puts_the_stage_back_when_it_fails(
+    core: pymmcore_plus.CMMCorePlus,
+) -> None:
+    def gives_up_where_it_is(core, focus_device, settings=None, *, should_cancel=None):
+        z_before = core.getPosition(focus_device)
+        core.setPosition(focus_device, 99.0)
+        return AutofocusResult(
+            kind="software",
+            method="gives_up",
+            focus_device=focus_device,
+            z_before=z_before,
+            z_after=99.0,
+            succeeded=False,
+        )
+
+    register_software_autofocus("gives_up", gives_up_where_it_is, dict)
+    try:
+        core.setZPosition(10.0)
+        assert not run_software_autofocus(core, "gives_up").succeeded
+        assert core.getZPosition() == pytest.approx(10.0)
+    finally:
+        _registry._REGISTRY.pop("gives_up", None)
+
+
+def test_run_by_hand_it_is_prepared_as_an_acquisition_would_prepare_it(
+    core: pymmcore_plus.CMMCorePlus, focus_sim: float
+) -> None:
+    """A routine run by hand -- a settings dialog's Test button, say -- used to fail
+    outright with live running, and to search with the hardware autofocus still
+    holding the focus."""
+    core.enableContinuousFocus(True)
+    core.startContinuousSequenceAcquisition(0)
+    core.setZPosition(20.0)
+
+    result = run_software_autofocus(
+        core, "oughtafocus", {"search_range_um": 20.0, "optimizer": "zstack"}
+    )
+
+    assert result.succeeded, result.message
+    assert not core.isSequenceRunning()
+    assert not core.isContinuousFocusLocked()

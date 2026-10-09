@@ -251,9 +251,13 @@ def zstack_search(
     center : float
         Position to scan around.
     search_range_um : float
-        Total width of the scan, centred on `center`.
+        Total width of the scan, centred on `center`.  Both ends are measured, and
+        nothing outside them ever is.
     step_um : float
-        Spacing between positions.  By default, 1.0.
+        The *largest* spacing between positions.  When the range is not a multiple
+        of it, the spacing shrinks just enough to divide the range evenly, rather
+        than the scan overshooting its upper limit or stopping short of it.  By
+        default, 1.0.
     should_cancel : Callable[[], bool] | None
         Polled before every image; raises `AutofocusCancelled` when it returns True.
     """
@@ -262,9 +266,16 @@ def zstack_search(
         raise ValueError(f"step_um must be positive, got {step_um}.")
 
     record = _Recorder(measure, should_cancel)
-    # include both ends of the range, so the scan is symmetric about center
-    n_steps = max(round(search_range_um / step_um), 1)
-    positions = center - search_range_um / 2.0 + step_um * np.arange(n_steps + 1)
+    # Build the grid from the two limits, not by stepping from one of them: the
+    # range is a travel limit, and stepping out from the lower end lands past the
+    # upper one whenever the step does not divide the range.
+    ratio = search_range_um / step_um
+    n_steps = max(
+        round(ratio) if math.isclose(ratio, round(ratio)) else math.ceil(ratio), 1
+    )
+    lower = center - search_range_um / 2.0
+    upper = center + search_range_um / 2.0
+    positions = np.linspace(lower, upper, n_steps + 1)
     for z in positions:
         record(float(z))
 

@@ -57,7 +57,8 @@ class OughtaFocusSettings:
         and reports the full focus curve.  By default, `"brent"`.
     tolerance_um : float
         For `"brent"`: stop once the peak is bracketed this tightly.  For `"zstack"`:
-        the spacing between images.  By default, 1.0.
+        the largest spacing between images, shrunk if need be so the scan starts and
+        ends exactly at the edges of the range.  By default, 1.0.
     scoring : ScoringMethod
         How to measure sharpness.  By default, `ScoringMethod.EDGES`.
     fft_lower_pct, fft_upper_pct : float
@@ -138,8 +139,12 @@ class JAFSettings:
         The fine pass covers `+/- fine_step_um * fine_steps` around the coarse best.
         By default, 0.2 and 5.
     threshold : float
-        Stop a pass once the score has dropped by more than this fraction of the best
-        seen.  By default, 0.02.
+        How far below the best score, as a fraction of it, counts as having passed
+        the peak.  A pass stops early once the score has risen to a peak and then
+        stayed further below it than this for two images in a row.  By default, 0.02.
+    full_scan : bool
+        Measure every position of each pass instead of stopping early.  Costs the
+        most images, but cannot be fooled by noise on a nearly flat curve.
     crop_ratio : float
         Fraction of the frame to score, centred.  By default, 0.2.
     channel_group, channel : str | None
@@ -165,6 +170,7 @@ class JAFSettings:
     fine_step_um: float = 0.2
     fine_steps: int = 5
     threshold: float = 0.02
+    full_scan: bool = False
     crop_ratio: float = 0.2
     channel_group: str | None = None
     channel: str | None = None
