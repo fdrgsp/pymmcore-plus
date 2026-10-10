@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from pymmcore_plus import CMMCorePlus, DeviceType, find_micromanager
+from pymmcore_plus import CMMCorePlus, DeviceType, FocusDirection, find_micromanager
 from pymmcore_plus._discovery import discover_mm
 from pymmcore_plus.metadata import summary_metadata
 from pymmcore_plus.model import CoreDevice, Device, Microscope
@@ -37,6 +37,20 @@ def test_model_from_core() -> None:
     model2.update_from_core(core)
 
     assert model == model2
+
+
+def test_model_from_core_focus_direction(tmp_path: Path) -> None:
+    core = CMMCorePlus()
+    core.loadSystemConfiguration()
+    core.setFocusDirection("Z", FocusDirection.TowardSample)
+
+    model = Microscope.create_from_core(core)
+    z = model.get_device("Z")
+    assert z.focus_direction is FocusDirection.TowardSample
+    assert z.labels == ()
+
+    model.save(cfg := tmp_path / "out.cfg")
+    assert "FocusDirection,Z,1" in cfg.read_text()
 
 
 def test_model_from_config() -> None:

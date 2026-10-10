@@ -44,7 +44,7 @@ STATE_DEVICE_GETTERS: dict[str, DeviceGetter] = {
 }
 STAGE_DEVICE_GETTERS: dict[str, DeviceGetter] = {
     **DEVICE_GETTERS,
-    "labels": CMMCorePlus.getFocusDirection,
+    "focus_direction": CMMCorePlus.getFocusDirection,
 }
 HUB_DEVICE_GETTERS: dict[str, DeviceGetter] = {
     **DEVICE_GETTERS,
