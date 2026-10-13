@@ -53,6 +53,23 @@ def test_model_from_core_focus_direction(tmp_path: Path) -> None:
     assert "FocusDirection,Z,1" in cfg.read_text()
 
 
+def test_model_saves_every_core_role(tmp_path: Path) -> None:
+    """A role set to other than the last-loaded device survives a save/load."""
+    core = CMMCorePlus()
+    core.loadSystemConfiguration()
+    # without a Roles line, MMCore would pick the last loaded XY stage
+    core.loadDevice("XY2", "DemoCamera", "DXYStage")
+    core.initializeDevice("XY2")
+    core.setXYStageDevice("XY")
+
+    Microscope.create_from_core(core).save(cfg := tmp_path / "out.cfg")
+    assert "Property,Core,XYStage,XY" in non_empty_lines(cfg)
+
+    core2 = CMMCorePlus()
+    core2.loadSystemConfiguration(cfg)
+    assert core2.getXYStageDevice() == "XY"
+
+
 def test_model_from_config() -> None:
     core = CMMCorePlus()
     core.loadSystemConfiguration()
@@ -126,11 +143,22 @@ def _assert_cfg_matches_core_save(
         r"PixelSizeAngle_dydz,.+,0|PixelSizeOptimalZ_Um,.+,0)"
     )
     core_lines = [x for x in non_empty_lines(core_out) if not pattern.match(x)]
-    # MMCore doesn't write out AutoShutter prefs, but we do
+    # MMCore only writes the Camera, Shutter and Focus roles, but we write them all
+    extra_roles = tuple(
+        f"Property,Core,{role}"
+        for role in (
+            "XYStage",
+            "AutoFocus",
+            "SLM",
+            "Galvo",
+            "ImageProcessor",
+            "AutoShutter",
+        )
+    )
     model_lines = [
         x
         for x in non_empty_lines(model_out)
-        if not x.startswith("Property,Core,AutoShutter") and "1,0,0,0,1,0" not in x
+        if not x.startswith(extra_roles) and "1,0,0,0,1,0" not in x
     ]
     assert core_lines == model_lines
 

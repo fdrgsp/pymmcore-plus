@@ -154,6 +154,11 @@ ROLES = (
     Keyword.CoreCamera,
     Keyword.CoreShutter,
     Keyword.CoreFocus,
+    Keyword.CoreXYStage,
+    Keyword.CoreAutoFocus,
+    Keyword.CoreSLM,
+    Keyword.CoreGalvo,
+    Keyword.CoreImageProcessor,
     Keyword.CoreAutoShutter,
 )
 
