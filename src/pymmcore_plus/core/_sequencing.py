@@ -12,7 +12,7 @@ from pymmcore_plus.core._constants import DeviceType, Keyword
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
-    from typing import Self  # py311
+    from typing import Self
 
     from useq._mda_event import Channel as EventChannel
 

@@ -141,10 +141,7 @@ def discover_mm() -> Iterator[DiscoveredMM]:
     """Discover Micro-Manager installations with caching and dedup by path."""
     yielded: set[Path] = set()
 
-    # An installation can go away while the process runs (uninstalled, or on a
-    # volume that was unmounted). Nothing else ever evicts from the cache, so
-    # without this an entry outlives the directory it describes and keeps being
-    # reported as discovered.
+    # Evict uninstalled installations and unmounted volumes from the cache.
     for stale in [p for p in _DISCOVERED_MMS if not p.is_dir()]:
         del _DISCOVERED_MMS[stale]
 

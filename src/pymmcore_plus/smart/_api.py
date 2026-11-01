@@ -491,8 +491,7 @@ def normalise_response(value: object, *, max_events: int = 1000) -> Response:
         raise TypeError(f"Response.events must be iterable, not {type(items)}")
 
     expanded = tuple(islice(_expand(items), max_events + 1))
-    n_events = sum(isinstance(item, useq.MDAEvent) for item in expanded)
-    if len(expanded) > max_events or n_events > max_events:
+    if len(expanded) > max_events:
         raise ValueError(f"more than {max_events} events requested in one response")
     return Response(
         events=expanded,

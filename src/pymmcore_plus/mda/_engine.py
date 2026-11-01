@@ -160,10 +160,7 @@ class MDAEngine(PMDAEngine):
         # the result of the most recent autofocus event (hardware or software),
         # also emitted on the `autofocusFinished` signal.
         self.last_autofocus_result: AutofocusResult | None = None
-        # set to True right after a successful autofocus action (if it was engaged
-        # at the start of the sequence); consumed (and reset to False) the next time
-        # we re-engage continuous focus, so we only do so once per autofocus action
-        # instead of before every subsequent image event.
+        # Re-engage continuous focus once after each successful hardware autofocus.
         self._af_needs_reengage: bool = False
 
         # used for one_shot autofocus to store the z correction for each position index.
@@ -332,6 +329,9 @@ class MDAEngine(PMDAEngine):
         """Execute an individual event and return the image data."""
         action = getattr(event, "action", None)
         core = self.mmcore
+        if isinstance(action, (HardwareAutofocus, SoftwareAutofocus)):
+            self._af_succeeded = False
+            self._af_needs_reengage = False
         if isinstance(action, HardwareAutofocus):
             self._exec_hardware_autofocus(event, action)
             return
@@ -347,12 +347,8 @@ class MDAEngine(PMDAEngine):
         if not isinstance(action, (AcquireImage, type(None))):
             return
 
-        # if the autofocus was engaged at the start of the sequence AND the autofocus
-        # action that just ran succeeded, re-engage it. NOTE: we need to do that AFTER
-        # the runner calls `setup_event`, so we can't do it inside the exec_event
-        # autofocus action above. We only do this once per autofocus action (not
-        # before every subsequent image event) to avoid redundantly re-triggering
-        # hardware autofocus devices (e.g. Nikon PFS) that react to every call.
+        # Re-engage once after successful hardware autofocus, after setup_event
+        # has moved the stage. Some devices retrigger on every enable call.
         if self._af_needs_reengage:
             core.enableContinuousFocus(True)
             self._af_needs_reengage = False

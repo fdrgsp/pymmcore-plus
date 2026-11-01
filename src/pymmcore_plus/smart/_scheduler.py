@@ -254,6 +254,8 @@ class SmartEventIterator:
     def __next__(self) -> useq.MDAEvent:
         with self._cond:
             while True:
+                if self._stop_reason is None:
+                    self._check_timeout()
                 if self._stop_reason is not None:
                     raise StopIteration
                 if str(self._runner.status.phase) == "finishing":
@@ -267,7 +269,6 @@ class SmartEventIterator:
                     return self._pop_ready()
 
                 if self._sync == "blocking" and self._pending:
-                    self._check_timeout()
                     self._cond.wait(self._poll_s)
                     continue
 
@@ -302,7 +303,6 @@ class SmartEventIterator:
                 if self._pending:
                     # Nothing to do now, but a pending analysis may still
                     # request more -- the run is not over yet.
-                    self._check_timeout()
                     self._cond.wait(self._poll_s)
                     continue
 
@@ -402,7 +402,8 @@ class SmartEventIterator:
 
     def _prepare(self, events: list[useq.MDAEvent]) -> None:
         """Rebase timing, group into bursts where allowed, and queue to hand out."""
-        rebased = [self._rebased(e) for e in events]
+        remaining = self._max_total_events - self._yielded
+        rebased = [self._rebased(e) for e in events[:remaining]]
         if self._combine is not None and len(rebased) > 1:
             rebased = self._combine(rebased)
         self._ready.extend(rebased)

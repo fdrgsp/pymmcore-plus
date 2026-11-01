@@ -64,7 +64,7 @@ def _centered_roi(roi: tuple[int, int, int, int], factor: float) -> list[int]:
     x, y, width, height = roi
     w, h = int(width * factor), int(height * factor)
     # keep at least a few pixels, or the 3x3 filters have nothing to work on
-    w, h = max(w, 8), max(h, 8)
+    w, h = min(max(w, 8), width), min(max(h, 8), height)
     return [x + (width - w) // 2, y + (height - h) // 2, w, h]
 
 

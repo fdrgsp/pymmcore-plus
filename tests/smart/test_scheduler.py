@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
+from unittest.mock import patch
 
 import pytest
 import useq
@@ -477,3 +478,43 @@ def test_drop_base_discards_prepared_base_events() -> None:
     next(it)
     it.drop_base()
     assert list(it) == []
+
+
+@pytest.mark.parametrize("injected", [False, True])
+def test_event_limit_caps_hardware_bursts(injected: bool) -> None:
+    events = [_ev(i) for i in range(10)]
+    it = SmartEventIterator(
+        [] if injected else events,
+        FakeRunner(),
+        sync="async",
+        combine=_combine,
+        max_total_events=3,
+    )
+    if injected:
+        it.inject(events, priority="next", parent_frame_id=None, response_id=0)
+    bursts = list(it)
+    assert len(bursts) == 1
+    assert [e.index["t"] for e in bursts[0].events] == [0, 1, 2]
+    assert it.yielded == 3
+    assert it.stop_reason == StopReason.MAX_EVENTS
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_async_timeout_checked_before_releasing_events(prepared: bool) -> None:
+    timed_out: list[int] = []
+    it = SmartEventIterator(
+        [_ev(i) for i in range(4)],
+        FakeRunner(),
+        sync="async",
+        combine=(lambda events: events) if prepared else None,
+        analysis_timeout_s=1,
+        on_analysis_timeout=timed_out.append,
+    )
+    next(it)
+    with patch("pymmcore_plus.smart._scheduler.time.monotonic", return_value=0):
+        it.analysis_submitted(0)
+    with patch("pymmcore_plus.smart._scheduler.time.monotonic", return_value=2):
+        with pytest.raises(StopIteration):
+            next(it)
+    assert timed_out == [0]
+    assert it.stop_reason == StopReason.TIMEOUT

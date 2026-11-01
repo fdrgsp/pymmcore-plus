@@ -160,8 +160,6 @@ def mmstudio() -> None:  # pragma: no cover
         print("[magenta]run `mmcore install` to install a version of Micro-Manager")
         raise typer.Exit(1)
     cmd = ["open", "-a", str(app)] if PLATFORM == "Darwin" else [str(app)]
-    # cwd= rather than contextlib.chdir, which needs Python 3.11 (requires-python
-    # is >=3.10).
     raise typer.Exit(subprocess.run(cmd, cwd=mm).returncode)
 
 

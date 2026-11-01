@@ -305,11 +305,7 @@ def _test_dev_install(
         _download_url(
             url=download_url,
             output_path=zip_path,
-            # A caller that replaced the logger (`mmcore install
-            # --plain-output`, i.e. anything scripting or piping this) is not
-            # attached to a terminal, so a rich progress bar would only spray
-            # color and cursor escapes into its output. Same rule the nightly
-            # branch of install() uses.
+            # Match nightly installs: custom loggers receive no rich progress output.
             show_progress=progress is not None and log_msg is _pretty_print,
         )
 

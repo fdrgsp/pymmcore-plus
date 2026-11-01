@@ -66,9 +66,8 @@ def bandpass_power(
     power = log_power_spectrum(image)
     h, w = power.shape
     # distance of every pixel from the zero frequency, as a fraction of Nyquist
-    cy, cx = h / 2.0, w / 2.0
-    yy = (np.arange(h) - cy) / max(cy, 1.0)
-    xx = (np.arange(w) - cx) / max(cx, 1.0)
+    yy = 2.0 * np.fft.fftshift(np.fft.fftfreq(h))
+    xx = 2.0 * np.fft.fftshift(np.fft.fftfreq(w))
     radius = np.hypot(yy[:, None], xx[None, :]) * 100.0
 
     band = (radius >= lower_pct) & (radius <= upper_pct)

@@ -156,3 +156,9 @@ def test_everything_at_once_round_trips(core: pymmcore_plus.CMMCorePlus) -> None
         tuple(core.getROI()),
     ) == before
     assert core.getAutoShutter() is True
+
+
+def test_crop_does_not_expand_small_roi() -> None:
+    from pymmcore_plus.autofocus._capture import _centered_roi
+
+    assert _centered_roi((3, 4, 4, 6), 0.5) == [3, 4, 4, 6]

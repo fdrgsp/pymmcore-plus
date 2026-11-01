@@ -227,3 +227,15 @@ def test_no_autofocus_finished_without_device(
     with patch.object(core, "getAutoFocusDevice", return_value=""):
         _exec(core, _af_event())
     assert results == []
+
+
+def test_failed_autofocus_clears_pending_reengagement(
+    core: pymmcore_plus.CMMCorePlus,
+) -> None:
+    core.mda.engine._af_was_engaged = True
+    with patch.object(core, "fullFocus", side_effect=[None, RuntimeError("no lock")]):
+        _exec(core, _af_event())
+        assert core.mda.engine._af_needs_reengage
+        _exec(core, _af_event())
+    assert not core.mda.engine._af_succeeded
+    assert not core.mda.engine._af_needs_reengage

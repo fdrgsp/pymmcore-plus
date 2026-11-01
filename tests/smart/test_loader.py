@@ -103,6 +103,8 @@ A = "def analyze(i, f, c): ...\n"
         (A, "must declare API_VERSION", None),
         ("API_VERSION = 2\n" + A, "not supported", 1),
         (V + "def analyze(image): ...\n", "exactly 3", 2),
+        (V + "def analyze(i, f, c, extra, *args): ...\n", "exactly 3", 2),
+        (V + "def analyze(i, f, c, *, extra): ...\n", "exactly 3", 2),
         (V + "async def analyze(i, f, c): ...\n", "async def", 2),
         (V + "def setup(): ...\n" + A, "exactly 1", 2),
         (V + "X = 3\nPARAMETERS = {'a': X}\n" + A, "must be a literal", 3),

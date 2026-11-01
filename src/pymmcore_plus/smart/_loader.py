@@ -376,7 +376,11 @@ def _read_hooks(tree: ast.Module | ast.ClassDef, *, method: bool = False) -> set
         args = node.args
         positional = len(args.posonlyargs) + len(args.args)
         required = positional - len(args.defaults)
-        if not (required <= expected <= positional or args.vararg is not None):
+        if (
+            required > expected
+            or (expected > positional and args.vararg is None)
+            or any(default is None for default in args.kw_defaults)
+        ):
             args_text = "image, frame, ctx" if node.name == "analyze" else "ctx"
             signature = f"({'self, ' if method else ''}{args_text})"
             raise ScriptError(

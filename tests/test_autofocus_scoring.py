@@ -178,3 +178,10 @@ def test_median_edges_is_blind_to_single_pixel_detail() -> None:
     assert score_image(isolated, ScoringMethod.MEDIAN_EDGES) == 0.0
     # a gradient score that does not median-filter still sees them
     assert score_image(isolated, ScoringMethod.TENENGRAD) > 0.0
+
+
+@pytest.mark.parametrize("shape", [(7, 9), (8, 9), (7, 8)])
+def test_fft_bandpass_excludes_dc_for_odd_sized_images(shape: tuple[int, int]) -> None:
+    from pymmcore_plus.autofocus._fft import bandpass_power
+
+    assert bandpass_power(np.ones(shape), 2.5, 100) == pytest.approx(0, abs=1e-20)
