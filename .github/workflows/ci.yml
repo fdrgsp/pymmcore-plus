@@ -191,10 +191,15 @@ jobs:
       - uses: pymmcore-plus/setup-mm-test-adapters@main
 
       - name: Run benchmarks
+        if: github.repository == 'pymmcore-plus/pymmcore-plus'
         uses: CodSpeedHQ/action@v5
         with:
           mode: simulation
           run: uv run pytest -W ignore --codspeed -v --color=yes
+
+      - name: Run benchmarks on forks
+        if: github.repository != 'pymmcore-plus/pymmcore-plus'
+        run: uv run pytest tests/test_bench.py -W ignore -v --color=yes
 
   deploy:
     needs: test

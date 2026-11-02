@@ -134,7 +134,9 @@ class SmartRunLog:
                 **run_info,
             }
             self._write_run()
-            (self.run_dir / SCRIPT_FILE).write_text(script_source, encoding="utf-8")
+            # The inspected source may already contain CRLF line endings. Keep
+            # its bytes (and recorded hash) intact on Windows as well.
+            (self.run_dir / SCRIPT_FILE).write_bytes(script_source.encode("utf-8"))
             self._frames = self.frames_path.open("a", encoding="utf-8")
             self._analysis = self.analysis_path.open("a", encoding="utf-8")
 
