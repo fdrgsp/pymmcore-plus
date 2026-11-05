@@ -54,11 +54,10 @@ if TYPE_CHECKING:
 
     import numpy as np
     from pymmcore import DeviceLabel
-    from useq import MDAEvent, MDASequence
+    from useq import MDAEvent
 
     from pymmcore_plus.mda._runner import DimensionOverride, SingleOutput
     from pymmcore_plus.metadata.schema import SummaryMetaV1
-    from pymmcore_plus.smart import ScriptSpec, SmartRunConfig, SmartRunner
 
     _T = TypeVar("_T")
     _DT = TypeVar("_DT", bound=_device.Device)
@@ -1678,59 +1677,6 @@ class CMMCorePlus(pymmcore.CMMCore):
         if block:
             th.join()
         return th
-
-    def run_smart(
-        self,
-        base: MDASequence,
-        analyzer: str | Path | ScriptSpec | SmartRunConfig | Any,
-        *,
-        output: SingleOutput | None = None,
-        run_dir: str | Path | Literal["auto"] | None = None,
-        block: bool = False,
-        **options: Any,
-    ) -> SmartRunner:
-        """Run a smart (event-driven) acquisition steered by an analysis *script*.
-
-        :sparkles: *This method is new in `CMMCorePlus`.*
-
-        *base* is acquired as usual, and frames are sent to the script's
-        ``analyze`` function, which decides what to acquire next. See
-        [`pymmcore_plus.smart`][pymmcore_plus.smart] for the script contract.
-
-        Parameters
-        ----------
-        base : useq.MDASequence
-            The base acquisition (it must contain at least one event).
-        analyzer : str | Path | ScriptSpec | SmartRunConfig | Analyzer
-            A path to an analysis script, an object with an ``analyze`` method
-            (see [`pymmcore_plus.smart.Analyzer`][]), or a ready
-            `SmartRunConfig`.
-        output : SingleOutput | None, optional
-            Where to save the data, as for `run_mda`. Every frame of a smart run
-            is stored along a single ``t`` axis, in acquisition order.
-        run_dir : str | Path | "auto" | None, optional
-            Folder for the run's records (settings, frame-to-event mapping,
-            analysis log, a copy of the script). None (default) writes nothing;
-            "auto" uses ``<data name>_smart`` next to the data, or a temporary
-            folder.
-        block : bool, optional
-            If True, block until the run has finished, by default False.
-        **options
-            Passed to `SmartRunConfig.from_analyzer`: ``params``, ``execution``
-            ("thread" or "process"), ``sync`` ("blocking" or "async"), ...
-
-        Returns
-        -------
-        SmartRunner
-            The runner: `wait()` for the summary, `cancel()`, its `events`...
-        """
-        from pymmcore_plus.smart import SmartRunner
-
-        runner = SmartRunner(self)
-        runner.run(
-            base, analyzer, output=output, run_dir=run_dir, block=block, **options
-        )
-        return runner
 
     def register_mda_engine(self, engine: PMDAEngine) -> None:
         """Set the MDA Engine to be used on `run_mda`.
