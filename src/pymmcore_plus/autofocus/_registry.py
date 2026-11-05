@@ -271,7 +271,7 @@ register_software_autofocus(
         "ended.\n"
         "\n"
         "By default a wide coarse scan followed by a narrow precise search, which "
-        "finds focus from further out than either manages alone -- at the cost of "
+        "finds focus from further out than either manages alone at the cost of "
         "both routines' images.\n"
         "\n"
         "Use it when focus can start far off, as after moving to a new well."
