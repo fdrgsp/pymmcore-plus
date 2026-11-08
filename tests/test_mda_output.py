@@ -226,12 +226,13 @@ def test_run_with_tiff_output_multiposition(core: CMMCorePlus, tmp_path: Path) -
     runner.run(seq, output=out)
 
     # Multi-file OME-TIFF strips the suffix and writes per-position files
-    # into a directory at the stem path.
+    # into a directory at the stem path.  Plate positions are prefixed with
+    # their well; `p###` is the acquisition order (A2 is visited first).
     out_dir = tmp_path / "multi"
     tiffs = sorted(out_dir.glob("*.ome.tiff"))
     assert [p.name for p in tiffs] == [
-        "multi_p000.ome.tiff",
-        "multi_p001.ome.tiff",
+        "multi_A1_p001.ome.tiff",
+        "multi_A2_p000.ome.tiff",
     ]
 
     # Every per-position file carries the full summary MapAnnotation.

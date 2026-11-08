@@ -104,6 +104,8 @@ dev = [
 [tool.uv.sources]
 pymmcore-plus = { workspace = true }
 useq-schema = { git = "https://github.com/fdrgsp/useq-schema", rev = "cite" }
+# Test against the ome-writers fork that pymmcore-gui actually installs.
+ome-writers = { git = "https://github.com/fdrgsp/ome-writers", rev = "cite" }
 
 [tool.uv]
 override-dependencies = [
