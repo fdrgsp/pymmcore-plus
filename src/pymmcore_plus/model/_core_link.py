@@ -63,8 +63,11 @@ class CoreObject(Protocol):
 
         args = self._core_args()
         for field_name, getter in self.CORE_GETTERS.items():
+            # Getters are unbound CMMCorePlus methods: call `core`'s own, so a
+            # subclass override applies (e.g. UniMMCore's Python devices).
+            method = getattr(core, getattr(getter, "__name__", ""), None)
             try:
-                yield field_name, getter(core, *args)
+                yield field_name, method(*args) if method else getter(core, *args)
             except RuntimeError as e:
                 if callable(on_err):
                     on_err(self, field_name, e)

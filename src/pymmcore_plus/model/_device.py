@@ -27,6 +27,14 @@ if TYPE_CHECKING:
 
 
 UNDEFINED = "UNDEFINED"
+
+
+def _is_py_device(core: CMMCorePlus, label: str) -> bool:
+    """Whether `label` is a Python device (only a UniMMCore has those)."""
+    is_py = getattr(core, "isPyDevice", None)
+    return bool(is_py and is_py(label))
+
+
 DEVICE_GETTERS: dict[str, DeviceGetter] = {
     "library": CMMCorePlus.getDeviceLibrary,
     "adapter_name": CMMCorePlus.getDeviceName,
@@ -36,6 +44,7 @@ DEVICE_GETTERS: dict[str, DeviceGetter] = {
     "uses_delay": CMMCorePlus.usesDeviceDelay,
     "parent_label": CMMCorePlus.getParentLabel,
     "property_names": CMMCorePlus.getDevicePropertyNames,
+    "is_py_device": _is_py_device,
     # "is_busy": CMMCorePlus.deviceBusy,  # Leave this out... it can crash when checking
 }
 STATE_DEVICE_GETTERS: dict[str, DeviceGetter] = {
@@ -85,6 +94,9 @@ class Device(CoreObject):
     # These are adapter_name (NOT loaded device labels) of child devices
     # from the same library that can be loaded into this hub.
     children: tuple[str, ...] = field(default_factory=tuple)
+
+    # Python device (UniMMCore): `library` is its module, `adapter_name` its class
+    is_py_device: bool = False
 
     @classmethod
     def from_metadata(cls, metadata: DeviceInfo) -> Self:

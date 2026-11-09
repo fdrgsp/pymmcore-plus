@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from pymmcore_plus import CMMCorePlus
-from pymmcore_plus.experimental.unicore import StateDevice, UniMMCore
+from pymmcore_plus.experimental.unicore import ShutterDevice, StateDevice, UniMMCore
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -247,3 +247,62 @@ def test_save_without_py_prefix(mixed_cfg_path: Path, tmp_path: Path) -> None:
     core3 = CMMCorePlus()
     with pytest.raises((OSError, RuntimeError)):
         core3.loadSystemConfiguration(str(save_path))
+
+
+class PyShutter(ShutterDevice):
+    _open = False
+
+    def get_open(self) -> bool:
+        return self._open
+
+    def set_open(self, value: bool) -> None:
+        self._open = value
+
+
+def test_model_save_keeps_python_devices(mixed_cfg_path: Path, tmp_path: Path) -> None:
+    """A Microscope model built from a UniMMCore writes its Python devices as #py."""
+    from pymmcore_plus.model import Microscope
+
+    module = "tests.00_unicore.test_pydevice_config"
+
+    core = UniMMCore()
+    core.loadSystemConfiguration(str(mixed_cfg_path))
+    core.loadDevice("PyShutter", module, "PyShutter")
+    core.initializeDevice("PyShutter")
+    core.setShutterDevice("PyShutter")
+
+    model = Microscope.create_from_core(core)
+    dichroic = model.get_device("Dichroic")
+    assert dichroic.is_py_device
+    assert dichroic.library == module
+    assert dichroic.adapter_name == "PyFilterWheel"
+    assert not model.get_device("Emission").is_py_device
+
+    out = tmp_path / "model_saved.cfg"
+    model.save(out)
+    lines = out.read_text().splitlines()
+    assert f"#py pyDevice,Dichroic,{module},PyFilterWheel" in lines
+    assert "#py Label,Dichroic,1,DAPI" in lines
+    assert "#py ConfigGroup,Channel,FITC,Dichroic,Label,FITC" in lines
+    assert "ConfigGroup,Channel,FITC,Emission,Label,Chroma-HQ535" in lines
+    assert "#py Property,Core,Shutter,PyShutter" in lines
+    # every line naming a Python device is a comment to the standard core
+    assert all(
+        line.startswith("#")
+        for line in lines
+        if "Dichroic" in line or "PyShutter" in line
+    )
+
+    # the file round-trips through UniMMCore...
+    core2 = UniMMCore()
+    core2.loadSystemConfiguration(str(out))
+    assert core2.isPyDevice("Dichroic")
+    assert core2.getShutterDevice() == "PyShutter"
+    core2.setConfig("Channel", "FITC")
+    assert core2.getStateLabel("Dichroic") == "FITC"
+
+    # ...and still loads, without the Python devices, in the standard core
+    core3 = CMMCorePlus()
+    core3.loadSystemConfiguration(str(out))
+    assert "Dichroic" not in core3.getLoadedDevices()
+    assert "Camera" in core3.getLoadedDevices()

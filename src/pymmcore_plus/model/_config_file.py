@@ -48,9 +48,20 @@ def dump(scope: Microscope, str_io: io.TextIOBase) -> None:
 # ------------------ Serialization ------------------
 
 
-def _serialize(*args: Any) -> str:
-    """Return a config string for the given args."""
-    return CFGCommand.FieldDelimiters.join(map(str, args))
+# UniMMCore's syntax for Python devices: lines the standard core skips as comments
+# (see `pymmcore_plus.experimental.unicore.core._config`)
+PY_PREFIX = "#py "
+PY_DEVICE = "pyDevice"
+
+
+def _serialize(*args: Any, py: bool = False) -> str:
+    """Return a config string for the given args, `#py`-prefixed if `py`."""
+    line = CFGCommand.FieldDelimiters.join(map(str, args))
+    return PY_PREFIX + line if py else line
+
+
+def _py_device_names(scope: Microscope) -> set[str]:
+    return {d.name for d in scope.devices if d.is_py_device}
 
 
 RESET = _serialize(CFGCommand.Property, Keyword.CoreDevice, Keyword.CoreInitialize, 0)
@@ -72,7 +83,8 @@ def iter_devices(scope: Microscope) -> Iterable[str]:
     for d in (*scope.assigned_com_ports, *scope.devices):
         if d.name not in seen:
             seen.add(d.name)
-            yield _serialize(CFGCommand.Device, d.name, d.library, d.adapter_name)
+            cmd = PY_DEVICE if d.is_py_device else CFGCommand.Device
+            yield _serialize(cmd, d.name, d.library, d.adapter_name, py=d.is_py_device)
 
 
 # NOTE/TODO:
@@ -92,7 +104,13 @@ def iter_pre_init_props(scope: Microscope) -> Iterable[str]:
             continue  # pragma: no cover
         for p in dev.properties:
             if p.is_pre_init:
-                yield _serialize(CFGCommand.Property, p.device_name, p.name, p.value)
+                yield _serialize(
+                    CFGCommand.Property,
+                    p.device_name,
+                    p.name,
+                    p.value,
+                    py=dev.is_py_device,
+                )
 
 
 def iter_com_port_props(scope: Microscope) -> Iterable[str]:
@@ -112,18 +130,25 @@ def iter_com_port_props(scope: Microscope) -> Iterable[str]:
 def iter_hub_refs(scope: Microscope) -> Iterable[str]:
     for d in scope.devices:
         if d.parent_label:
-            yield _serialize(CFGCommand.ParentID, d.name, d.parent_label)
+            yield _serialize(
+                CFGCommand.ParentID, d.name, d.parent_label, py=d.is_py_device
+            )
 
 
 def iter_delays(scope: Microscope) -> Iterable[str]:
     for d in scope.devices:
         if d.delay_ms:
-            yield _serialize(CFGCommand.Delay, d.name, d.delay_ms)
+            yield _serialize(CFGCommand.Delay, d.name, d.delay_ms, py=d.is_py_device)
 
 
 def iter_focus_directions(scope: Microscope) -> Iterable[str]:
     for d in scope.filter_devices(device_type=DeviceType.Stage):
-        yield _serialize(CFGCommand.FocusDirection, d.name, d.focus_direction.value)
+        yield _serialize(
+            CFGCommand.FocusDirection,
+            d.name,
+            d.focus_direction.value,
+            py=d.is_py_device,
+        )
 
 
 def iter_labels(scope: Microscope) -> Iterable[str]:
@@ -132,10 +157,13 @@ def iter_labels(scope: Microscope) -> Iterable[str]:
             yield f"# {d.name}"
             for state, label in enumerate(d.labels):
                 if label:
-                    yield _serialize(CFGCommand.Label, d.name, state, label)
+                    yield _serialize(
+                        CFGCommand.Label, d.name, state, label, py=d.is_py_device
+                    )
 
 
 def iter_config_presets(scope: Microscope) -> Iterable[str]:
+    py_devices = _py_device_names(scope)
     for group in scope.config_groups.values():
         yield f"# Group: {group.name}"
         # empty group record
@@ -147,7 +175,13 @@ def iter_config_presets(scope: Microscope) -> Iterable[str]:
         for preset in group.presets.values():
             yield f"# Preset: {preset.name}"
             for s in preset.settings:
-                yield _serialize(CFGCommand.ConfigGroup, group.name, preset.name, *s)
+                yield _serialize(
+                    CFGCommand.ConfigGroup,
+                    group.name,
+                    preset.name,
+                    *s,
+                    py=s.device_name in py_devices,
+                )
 
 
 ROLES = (
@@ -166,18 +200,27 @@ ROLES = (
 def iter_roles(scope: Microscope) -> Iterable[str]:
     # we want to maintain the order of ROLES... not the order of the properties
     vals = {p.name: p.value for p in scope.core_device.properties if p.name in ROLES}
+    py_devices = _py_device_names(scope)
 
     for role in ROLES:
         if role in vals and (val := vals[role]):
-            yield _serialize(CFGCommand.Property, Keyword.CoreDevice, role, val)
+            yield _serialize(
+                CFGCommand.Property, Keyword.CoreDevice, role, val, py=val in py_devices
+            )
 
 
 def iter_pixel_size_presets(scope: Microscope) -> Iterable[str]:
     pixels = scope.pixel_size_group
+    py_devices = _py_device_names(scope)
     for p in pixels.presets.values():
         yield f"# Resolution preset: {p.name}"
         for setting in p.settings:
-            yield _serialize(CFGCommand.ConfigPixelSize, p.name, *setting)
+            yield _serialize(
+                CFGCommand.ConfigPixelSize,
+                p.name,
+                *setting,
+                py=setting.device_name in py_devices,
+            )
         yield _serialize(CFGCommand.PixelSize_um, p.name, p.pixel_size_um)
         if p.affine != DEFAULT_AFFINE:
             yield _serialize(CFGCommand.PixelSizeAffine, p.name, *p.affine)
