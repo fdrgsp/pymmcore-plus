@@ -460,9 +460,21 @@ def get_available_devices(core: CMMCorePlus) -> list[AvailableDevice]:
             != DeviceInitializationState.InitializedSuccessfully
         ):
             continue
+        is_py = _is_py_device(core, hub_label)
+        if hub_dev is None and is_py:
+            # a Python hub (UniMMCore) isn't among the C++ adapters' devices
+            hub_dev = AvailableDevice(
+                library=lib_name,
+                adapter_name=hub_adapter,
+                device_type=DeviceType.Hub,
+                is_py_device=True,
+            )
         for child in core.getInstalledDevices(hub_label):
             dev = AvailableDevice(
-                library=lib_name, adapter_name=child, library_hub=hub_dev
+                library=lib_name,
+                adapter_name=child,
+                library_hub=hub_dev,
+                is_py_device=is_py,
             )
             available_devices.append(dev)
 

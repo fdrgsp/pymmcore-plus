@@ -8,7 +8,12 @@ from typing import TYPE_CHECKING
 import pytest
 
 from pymmcore_plus import CMMCorePlus
-from pymmcore_plus.experimental.unicore import ShutterDevice, StateDevice, UniMMCore
+from pymmcore_plus.experimental.unicore import (
+    HubDevice,
+    ShutterDevice,
+    StateDevice,
+    UniMMCore,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -306,3 +311,27 @@ def test_model_save_keeps_python_devices(mixed_cfg_path: Path, tmp_path: Path) -
     core3.loadSystemConfiguration(str(out))
     assert "Dichroic" not in core3.getLoadedDevices()
     assert "Camera" in core3.getLoadedDevices()
+
+
+class PyHub(HubDevice):
+    def get_installed_peripherals(self) -> list[tuple[str, str]]:
+        return [("PyShutter", "A shutter on the hub")]
+
+
+def test_model_offers_python_hub_peripherals() -> None:
+    """A loaded Python hub's peripherals are linked to it, so they can be offered."""
+    from pymmcore_plus.model import Device, Microscope
+
+    module = "tests.00_unicore.test_pydevice_config"
+    core = UniMMCore()
+    core.loadDevice("Hub", module, "PyHub")
+    core.initializeDevice("Hub")
+
+    model = Microscope()
+    model.load_available_devices(core)
+    hub = Device.create_from_core(core, name="Hub")
+    model.devices.append(hub)
+
+    (child,) = hub.available_peripherals(model)
+    assert (child.library, child.adapter_name) == (module, "PyShutter")
+    assert child.is_py_device
