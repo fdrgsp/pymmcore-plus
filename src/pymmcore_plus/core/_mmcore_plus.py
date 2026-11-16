@@ -1054,7 +1054,7 @@ class CMMCorePlus(pymmcore.CMMCore):
                     continue
                 if (
                     property_type is not None
-                    and super().getPropertyType(dev, prop) not in property_types
+                    and self.getPropertyType(dev, prop) not in property_types
                 ):
                     continue
                 if (
