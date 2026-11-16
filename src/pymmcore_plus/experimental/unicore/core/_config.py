@@ -22,23 +22,33 @@ Format example:
 from __future__ import annotations
 
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
-from pymmcore_plus import CFGCommand, CFGGroup, DeviceType, Keyword
+from pymmcore_plus import CFGCommand, CFGGroup, CMMCorePlus, DeviceType, Keyword
 from pymmcore_plus._util import timestamp
+from pymmcore_plus.experimental.unicore._device_manager import import_device_class
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Sequence
 
     from ._unicore import UniMMCore
 
-__all__ = ["load_system_configuration", "save_system_configuration"]
+__all__ = [
+    "PyDeviceLoadError",
+    "load_system_configuration",
+    "save_system_configuration",
+]
 
 # Prefix for Python device lines (treated as comment by C++/regular pymmcore)
 PY_PREFIX = "#py "
 # Custom command names (not in CFGCommand enum)
 _PY_DEVICE_CMD = "pyDevice"
+
+Stage = Literal[
+    "import", "construct", "initialize", "property", "startup", "wait", "unload"
+]
 
 
 # =============================================================================
@@ -46,7 +56,30 @@ _PY_DEVICE_CMD = "pyDevice"
 # =============================================================================
 
 
-def load_system_configuration(core: UniMMCore, filename: str | Path) -> None:
+@dataclass(frozen=True)
+class PyDeviceLoadError:
+    """A Python device problem met while loading a config file.
+
+    `stage` is where it failed: `"import"` (module, class lookup), `"construct"`,
+    `"initialize"`, `"wait"` (`busy()` raised) or `"unload"` (`shutdown()`
+    raised while removing it) mean the device was skipped. `"property"` (a
+    config line referencing it) and `"startup"` (a `System/Startup` setting)
+    mean only that setting was skipped and the device was kept. The peripherals
+    of a hub that failed are reported with the hub's stage and exception.
+    """
+
+    label: str
+    stage: Stage
+    exc: BaseException
+    line_no: int | None = None  # None for stages not tied to one line
+    line: str = ""
+
+
+def load_system_configuration(
+    core: UniMMCore,
+    filename: str | Path,
+    on_device_error: Callable[[PyDeviceLoadError], None] | None = None,
+) -> None:
     """Load system configuration from a file.
 
     This is a Python implementation of MMCore::loadSystemConfigurationImpl
@@ -59,15 +92,23 @@ def load_system_configuration(core: UniMMCore, filename: str | Path) -> None:
         The core instance to configure.
     filename : str | Path
         Path to the configuration file.
+    on_device_error : Callable[[PyDeviceLoadError], None] | None
+        If given, Python device failures are passed to it and skipped instead of
+        aborting the load (see `UniMMCore.loadSystemConfiguration`).
     """
     path = Path(filename).expanduser().resolve()
     if not path.exists():  # pragma: no cover
         raise FileNotFoundError(f"Configuration file not found: {path}")
 
-    load_from_string(core, path.read_text(), str(path))
+    load_from_string(core, path.read_text(), str(path), on_device_error)
 
 
-def load_from_string(core: UniMMCore, text: str, source: str = "<string>") -> None:
+def load_from_string(
+    core: UniMMCore,
+    text: str,
+    source: str = "<string>",
+    on_device_error: Callable[[PyDeviceLoadError], None] | None = None,
+) -> None:
     """Load system configuration from a string.
 
     Parameters
@@ -78,28 +119,20 @@ def load_from_string(core: UniMMCore, text: str, source: str = "<string>") -> No
         The configuration text.
     source : str
         Source identifier for error messages.
+    on_device_error : Callable[[PyDeviceLoadError], None] | None
+        If given, Python device failures are passed to it and skipped instead of
+        aborting the load (see `UniMMCore.loadSystemConfiguration`).
     """
-    for line_num, line in enumerate(text.splitlines(), start=1):
-        # Strip Windows CR if present
-        if not (line := line.rstrip("\r").strip()):
-            continue
+    lines = list(_iter_commands(text))
+    if on_device_error is not None:
+        _TolerantLoader(core, source, on_device_error).run(lines)
+        return
 
+    for line_num, line in lines:
         try:
-            # strip #py prefix (python devices)
-            if line.startswith(PY_PREFIX):
-                line = line[len(PY_PREFIX) :].lstrip()
-
-            if line.startswith("#"):
-                # Regular comment - skip
-                continue
-            else:
-                # Standard command
-                _run_command(core, line)
+            _run_command(core, line)
         except Exception as e:
-            raise RuntimeError(
-                f"Error in configuration file {source!r} at line {line_num}: "
-                f"{line!r}\n{e}"
-            ) from e
+            raise _line_error(source, line_num, line, e) from e
 
     # File parsing finished, apply startup configuration if defined
     if core.isConfigDefined(CFGGroup.System, CFGGroup.System_Startup):
@@ -113,16 +146,213 @@ def load_from_string(core: UniMMCore, text: str, source: str = "<string>") -> No
     core.updateSystemStateCache()
 
 
+def _iter_commands(text: str) -> Iterator[tuple[int, str]]:
+    """Yield `(line_number, command)`, with `#py ` stripped and comments dropped."""
+    for line_num, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if line.startswith(PY_PREFIX):
+            line = line[len(PY_PREFIX) :].lstrip()
+        if line and not line.startswith("#"):
+            yield line_num, line
+
+
+def _line_error(source: str, line_num: int, line: str, e: Exception) -> RuntimeError:
+    return RuntimeError(
+        f"Error in configuration file {source!r} at line {line_num}: {line!r}\n{e}"
+    )
+
+
+_ROLES = {
+    Keyword.CoreCamera,
+    Keyword.CoreShutter,
+    Keyword.CoreFocus,
+    Keyword.CoreXYStage,
+    Keyword.CoreAutoFocus,
+    Keyword.CoreSLM,
+    Keyword.CoreGalvo,
+}
+
+
+def _referenced_labels(cmd: str, args: Sequence[str]) -> Sequence[str]:
+    """Return the device labels that a config command refers to."""
+    if cmd in (
+        _PY_DEVICE_CMD,
+        CFGCommand.Device,
+        CFGCommand.Delay,
+        CFGCommand.FocusDirection,
+        CFGCommand.Label,
+    ):
+        return args[:1]
+    if cmd == CFGCommand.Property:
+        if args[:1] != [Keyword.CoreDevice]:
+            return args[:1]
+        return args[2:3] if args[1:2] and args[1] in _ROLES else ()
+    if cmd == CFGCommand.ConfigGroup:
+        return _referenced_labels(CFGCommand.Property, args[2:])
+    if cmd == CFGCommand.ConfigPixelSize:
+        return args[1:2]
+    if cmd == CFGCommand.ParentID:
+        return args[:2]
+    return ()
+
+
+class _TolerantLoader:
+    """Load a config, skipping Python devices that fail and reporting them."""
+
+    def __init__(
+        self,
+        core: UniMMCore,
+        source: str,
+        report: Callable[[PyDeviceLoadError], None],
+    ) -> None:
+        self._core = core
+        self._devices = core._pydevices  # noqa: SLF001
+        self._source = source
+        self._report = report
+        self._skipped: set[str] = set()
+        self._parents: dict[str, str] = {}
+        self._pixel_devices: dict[str, set[str]] = {}
+        self._skipped_pixels: set[str] = set()
+
+    def run(self, lines: Sequence[tuple[int, str]]) -> None:
+        commands = [(line_num, line, *_split(line)) for line_num, line in lines]
+        # read every line first: a hub's peripherals and a calibration's devices
+        # must be known when a device fails, even if they are declared later
+        for _, _, cmd, args in commands:
+            if cmd == CFGCommand.ParentID and len(args) == 2:
+                self._parents[args[0]] = args[1]
+            elif cmd == CFGCommand.ConfigPixelSize and len(args) == 4:
+                self._pixel_devices.setdefault(args[0], set()).add(args[1])
+
+        core = self._core
+        for line_num, line, cmd, args in commands:
+            if (
+                args
+                and args[0] in self._skipped_pixels
+                and (cmd == CFGCommand.ConfigPixelSize or cmd.startswith("PixelSize"))
+            ):
+                continue
+            labels = _referenced_labels(cmd, args)
+            if self._skipped.intersection(labels):
+                continue
+            if cmd == _PY_DEVICE_CMD and len(args) == 3:
+                label, module, cls_name = args
+                self._load_device(label, module, cls_name, line_num, line)
+                continue
+            try:
+                _run_command(core, line)
+            except Exception as e:
+                py_label = next((lbl for lbl in labels if core.isPyDevice(lbl)), None)
+                if py_label is None:
+                    raise _line_error(self._source, line_num, line, e) from e
+                self._report(PyDeviceLoadError(py_label, "property", e, line_num, line))
+                continue
+            if cmd == CFGCommand.Property and args == [
+                Keyword.CoreDevice,
+                Keyword.CoreInitialize,
+                "1",
+            ]:
+                self._drop_failed_initializations()
+
+        if core.isConfigDefined(CFGGroup.System, CFGGroup.System_Startup):
+            self._wait_for_system()
+            core.updateSystemStateCache()
+            self._apply_startup()
+        self._wait_for_system()
+        core.updateSystemStateCache()
+
+    def _load_device(
+        self, label: str, module: str, cls_name: str, line_num: int, line: str
+    ) -> None:
+        stage: Stage = "import"
+        try:
+            cls = import_device_class(module, cls_name)
+            stage = "construct"
+            self._core.loadPyDevice(label, cls())
+        except Exception as e:
+            self._fail(label, stage, e, line_num, line)
+
+    def _fail(
+        self,
+        label: str,
+        stage: Stage,
+        exc: BaseException,
+        line_num: int | None = None,
+        line: str = "",
+    ) -> None:
+        """Skip `label` and its peripherals (unloaded first), and report each."""
+        self._skipped.add(label)
+        pixels = {p for p, labels in self._pixel_devices.items() if label in labels}
+        self._skipped_pixels.update(pixels)
+        for preset in pixels.intersection(self._core.getAvailablePixelSizeConfigs()):
+            self._core.deletePixelSizeConfig(preset)
+        self._report(PyDeviceLoadError(label, stage, exc, line_num, line))
+        peripherals = [p for p, hub in self._parents.items() if hub == label]
+        peripherals += self._devices.get_loaded_peripherals(label)
+        for peripheral in dict.fromkeys(peripherals):
+            if peripheral not in self._skipped:
+                self._fail(peripheral, stage, exc, line_num, line)
+        if label in self._devices:
+            try:
+                self._core.unloadDevice(label)
+            except Exception as e:
+                self._report(PyDeviceLoadError(label, "unload", e))
+
+    def _drop_failed_initializations(self) -> None:
+        for label in list(self._devices):
+            if label in self._devices and (
+                error := self._core.getPyDeviceInitializationError(label)
+            ):
+                self._fail(label, "initialize", error)
+
+    def _wait_for_system(self) -> None:
+        """Wait for C++ devices, then for each Python device on its own."""
+        CMMCorePlus.waitForDeviceType(self._core, DeviceType.AnyType)
+        for label in list(self._devices):
+            if label in self._devices:
+                try:
+                    self._core.waitForDevice(label)
+                except Exception as e:
+                    self._fail(label, "wait", e)
+
+    def _apply_startup(self) -> None:
+        """Apply `System/Startup`: C++ errors raise, Python ones skip the setting."""
+        core = self._core
+        group, preset = CFGGroup.System, CFGGroup.System_Startup
+        CMMCorePlus.setConfig(core, group, preset)
+        settings = core.getConfigData(group, preset, native=True)
+        failed = []
+        for i in range(settings.size()):
+            s = settings.getSetting(i)
+            device, prop = s.getDeviceLabel(), s.getPropertyName()
+            if core.isPyDevice(device):
+                try:
+                    core.setProperty(device, prop, s.getPropertyValue())
+                except Exception:
+                    failed.append((device, prop, s.getPropertyValue()))
+        # retry once: a setting may depend on another one applied after it
+        for device, prop, value in failed:
+            try:
+                core.setProperty(device, prop, value)
+            except Exception as e:
+                self._report(
+                    PyDeviceLoadError(
+                        device, "startup", e, line=f"Property,{device},{prop},{value}"
+                    )
+                )
+
+
+def _split(line: str) -> tuple[str, list[str]]:
+    cmd, *args = line.split(CFGCommand.FieldDelimiters)
+    return cmd, args
+
+
 def _run_command(core: UniMMCore, line: str) -> None:
     """Execute a single configuration command.
 
     Mirrors MMCore::loadSystemConfigurationImpl command processing.
     """
-    tokens = line.split(CFGCommand.FieldDelimiters)
-    if not tokens:  # pragma: no cover
-        return
-
-    cmd_name, *args = tokens
+    cmd_name, args = _split(line)
 
     # Handle custom commands first
     if cmd_name == _PY_DEVICE_CMD:
@@ -146,17 +376,8 @@ def _run_command(core: UniMMCore, line: str) -> None:
     if command == CFGCommand.ImageSynchro:  # pragma: no cover
         raise ValueError("ImageSynchro command has been removed from config format")
 
-    executor = _COMMAND_EXECUTORS.get(command)
-    if executor is None:  # pragma: no cover
-        # Unknown command in our executor map - should not happen for valid CFGCommand
-        return
-
-    try:
+    if executor := _COMMAND_EXECUTORS.get(command):
         executor(core, args)
-    except Exception as e:  # pragma: no cover
-        raise RuntimeError(
-            f"Error executing command {cmd_name!r} with arguments {args!r}: {e}"
-        ) from e
 
 
 # =============================================================================

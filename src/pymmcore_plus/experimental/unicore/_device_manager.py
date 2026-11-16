@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -103,6 +104,11 @@ class PyDeviceManager:
             return DeviceInitializationState.Uninitialized
         return DeviceInitializationState.InitializationFailed
 
+    def initialization_error(self, label: str) -> BaseException | None:
+        """Return the error raised by the device's `initialize()`, if any."""
+        state = self[label]._initialized_
+        return state if isinstance(state, BaseException) else None
+
     def unload(self, label_or_device: str | Device) -> None:
         """Unload a loaded device by label or instance."""
         if isinstance(label_or_device, Device):
@@ -112,17 +118,26 @@ class PyDeviceManager:
         else:
             _device, label = self[label_or_device], label_or_device
 
-        with _device as dev:
-            dev.shutdown()
-            dev._initialized_ = False
-            dev._label_ = ""
-            dev._core_proxy_ = None
-        self._devices.pop(label)
+        try:
+            with _device as dev:
+                dev.shutdown()
+        finally:
+            _device._initialized_ = False
+            _device._label_ = ""
+            _device._core_proxy_ = None
+            del self._devices[label]
 
     def unload_all(self) -> None:
-        """Unload all loaded devices."""
+        """Unload all loaded devices, then raise the first shutdown error, if any."""
+        first_error: Exception | None = None
         for label in list(self._devices):
-            self.unload(label)
+            try:
+                self.unload(label)
+            except Exception as e:
+                logger.exception(f"Failed to shut down device {label!r}")
+                first_error = first_error or e
+        if first_error is not None:
+            raise first_error
 
     def __len__(self) -> int:
         """Return the number of loaded device labels."""
@@ -204,3 +219,19 @@ class PyDeviceManager:
             for label, device in self._devices.items()
             if device.get_parent_label() == hub_label
         )
+
+
+def import_device_class(module_name: str, cls_name: str) -> type[Device]:
+    """Import `module_name` and return its `Device` subclass `cls_name`.
+
+    Errors raised while importing the module propagate unchanged.
+    """
+    module = importlib.import_module(module_name)
+    cls = getattr(module, cls_name, None)
+    if cls is None:
+        raise AttributeError(
+            f"Could not find class {cls_name!r} in python module {module_name!r}"
+        )
+    if not (isinstance(cls, type) and issubclass(cls, Device)):
+        raise TypeError(f"{cls_name} is not a subclass of Device")
+    return cls

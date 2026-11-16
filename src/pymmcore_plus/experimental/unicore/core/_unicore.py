@@ -27,10 +27,12 @@ from pymmcore_plus.core import CMMCorePlus, DeviceType, FocusDirection, Keyword
 from pymmcore_plus.core import Keyword as KW
 from pymmcore_plus.core._config import Configuration
 from pymmcore_plus.core._constants import PixelType
-from pymmcore_plus.experimental.unicore._device_manager import PyDeviceManager
+from pymmcore_plus.experimental.unicore._device_manager import (
+    PyDeviceManager,
+    import_device_class,
+)
 from pymmcore_plus.experimental.unicore._proxy import create_core_proxy
 from pymmcore_plus.experimental.unicore.devices._camera import CameraDevice
-from pymmcore_plus.experimental.unicore.devices._device_base import Device
 from pymmcore_plus.experimental.unicore.devices._hub import HubDevice
 from pymmcore_plus.experimental.unicore.devices._shutter import ShutterDevice
 from pymmcore_plus.experimental.unicore.devices._slm import SLMDevice
@@ -60,6 +62,9 @@ if TYPE_CHECKING:
     )
 
     from pymmcore_plus.core._constants import DeviceInitializationState, PropertyType
+    from pymmcore_plus.experimental.unicore.devices._device_base import Device
+
+    from ._config import PyDeviceLoadError
 
     PyDeviceLabel = NewType("PyDeviceLabel", DeviceLabel)
     _T = TypeVar("_T")
@@ -203,7 +208,10 @@ class UniMMCore(CMMCorePlus):
     # -----------------------------------------------------------------------
 
     def loadSystemConfiguration(
-        self, fileName: str | Path = "MMConfig_demo.cfg"
+        self,
+        fileName: str | Path = "MMConfig_demo.cfg",
+        *,
+        on_device_error: Callable[[PyDeviceLoadError], None] | None = None,
     ) -> None:
         """Load a system config file conforming to the MM `.cfg` format.
 
@@ -230,6 +238,12 @@ class UniMMCore(CMMCorePlus):
         ----------
         fileName : str | Path
             Path to the configuration file. Defaults to "MMConfig_demo.cfg".
+        on_device_error : Callable[[PyDeviceLoadError], None] | None
+            If given, a Python device that fails to import, construct, initialize
+            or respond is unloaded and skipped (with its hub's peripherals and
+            every line that references it), a failing line on a loaded Python
+            device skips only that line, and each failure is passed to this
+            callback instead of aborting the load. C++ device errors still raise.
         """
         fpath = Path(fileName).expanduser()
         if not fpath.exists() and not fpath.is_absolute() and self._mm_path:
@@ -239,7 +253,7 @@ class UniMMCore(CMMCorePlus):
 
         cfg_path = str(fpath.resolve())
         try:
-            load_system_configuration(self, cfg_path)
+            load_system_configuration(self, cfg_path, on_device_error)
         except Exception:
             # On failure, unload all devices to avoid leaving loaded but
             # uninitialized devices that could cause crashes
@@ -308,21 +322,17 @@ class UniMMCore(CMMCorePlus):
     def _get_py_device_instance(self, module_name: str, cls_name: str) -> Device:
         """Import and instantiate a python device from `module_name.cls_name`."""
         try:
-            module = __import__(module_name, fromlist=[cls_name])
-        except ImportError as e:
-            raise type(e)(
+            cls = import_device_class(module_name, cls_name)
+        except ModuleNotFoundError as e:
+            # a missing dependency of the module propagates as is
+            if e.name is None or not f"{module_name}.".startswith(f"{e.name}."):
+                raise
+            raise ModuleNotFoundError(
                 f"{module_name!r} is not a known Micro-manager DeviceAdapter, or "
-                "an importable python module "
+                "an importable python module",
+                name=e.name,
             ) from e
-        try:
-            cls = getattr(module, cls_name)
-        except AttributeError as e:
-            raise AttributeError(
-                f"Could not find class {cls_name!r} in python module {module_name!r}"
-            ) from e
-        if isinstance(cls, type) and issubclass(cls, Device):
-            return cls()
-        raise TypeError(f"{cls_name} is not a subclass of Device")
+        return cls()
 
     def loadPyDevice(self, label: str, device: Device) -> None:
         """Load a `unicore.Device` as a python device.
@@ -376,6 +386,35 @@ class UniMMCore(CMMCorePlus):
 
         self._state_cache.clear_device(label)
 
+        # A calibration is invalid if any of its device conditions is missing.
+        for resolution_id in self.getAvailablePixelSizeConfigs():
+            pixel_config = self.getPixelSizeConfigData(resolution_id, native=True)
+            if any(
+                pixel_config.getSetting(i).getDeviceLabel() == label
+                for i in range(pixel_config.size())
+            ):
+                self.deletePixelSizeConfig(resolution_id)
+
+        # Core role settings live in C++ presets even when they name a Python device.
+        for native_group in self.getAvailableConfigGroups():
+            for native_preset in self.getAvailableConfigs(native_group):
+                native_config = super().getConfigData(
+                    native_group, native_preset, native=True
+                )
+                for i in range(native_config.size()):
+                    setting = native_config.getSetting(i)
+                    if (
+                        str(setting.getDeviceLabel()) == KW.CoreDevice
+                        and str(setting.getPropertyName()) in CURRENT
+                        and setting.getPropertyValue() == label
+                    ):
+                        super().deleteConfig(
+                            native_group,
+                            native_preset,
+                            KW.CoreDevice,
+                            setting.getPropertyName(),
+                        )
+
         for group_name, group in list(self._py_config_groups.items()):
             for preset_name, config in list(group.items()):
                 to_clear = [k for k in config if k[0] == label]
@@ -390,23 +429,31 @@ class UniMMCore(CMMCorePlus):
         if label not in self._pydevices:  # pragma: no cover
             return super().unloadDevice(label)
         self._cleanup_sequence_state(label)
-        self._pydevices.unload(label)
-        self._cleanup_pydevice_state(label)
+        try:
+            self._pydevices.unload(label)
+        finally:
+            self._cleanup_pydevice_state(label)
 
     def _reset_python(self) -> None:
         self._cleanup_sequence_state()
-        self._pydevices.unload_all()
-        self._pycore.reset_current()
-        self._py_config_groups.clear()
-        self._state_cache.clear()
+        try:
+            self._pydevices.unload_all()
+        finally:
+            self._pycore.reset_current()
+            self._py_config_groups.clear()
+            self._state_cache.clear()
 
     def unloadAllDevices(self) -> None:
-        self._reset_python()
-        super().unloadAllDevices()
+        try:
+            self._reset_python()
+        finally:
+            super().unloadAllDevices()
 
     def reset(self) -> None:
-        self._reset_python()
-        super().reset()
+        try:
+            self._reset_python()
+        finally:
+            super().reset()
 
     def initializeDevice(self, label: DeviceLabel | str) -> None:
         if label not in self._pydevices:  # pragma: no cover
@@ -421,6 +468,16 @@ class UniMMCore(CMMCorePlus):
         if label not in self._pydevices:  # pragma: no cover
             return super().getDeviceInitializationState(label)
         return self._pydevices.get_initialization_state(label)
+
+    def getPyDeviceInitializationError(
+        self, label: DeviceLabel | str
+    ) -> BaseException | None:
+        """Return the error raised by a Python device's `initialize()`, if any.
+
+        `initializeDevice` doesn't raise for a Python device: it records the error
+        and sets the initialization state to `InitializationFailed`.
+        """
+        return self._pydevices.initialization_error(label)
 
     def getLoadedDevices(self) -> tuple[DeviceLabel, ...]:
         return tuple(self._pydevices) + tuple(super().getLoadedDevices())

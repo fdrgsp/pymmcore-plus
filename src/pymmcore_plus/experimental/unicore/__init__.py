@@ -1,3 +1,4 @@
+from .core._config import PyDeviceLoadError
 from .core._unicore import UniMMCore
 from .devices._camera import CameraDevice, SimpleCameraDevice
 from .devices._device_base import Device
@@ -15,6 +16,7 @@ __all__ = [
     "GenericDevice",
     "HubDevice",
     "PropertyInfo",
+    "PyDeviceLoadError",
     "SLMDevice",
     "ShutterDevice",
     "SimpleCameraDevice",
