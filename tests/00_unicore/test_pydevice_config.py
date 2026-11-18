@@ -335,3 +335,30 @@ def test_model_offers_python_hub_peripherals() -> None:
     (child,) = hub.available_peripherals(model)
     assert (child.library, child.adapter_name) == (module, "PyShutter")
     assert child.is_py_device
+
+
+@pytest.mark.parametrize("backend", ["psygnal", "qt"])
+def test_load_emits_no_events_until_it_is_done(
+    mixed_cfg_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    """Like MMCore's loader: listeners must not see a half-loaded system."""
+    if backend == "qt":
+        pytest.importorskip("qtpy")
+    monkeypatch.setenv("PYMM_SIGNALS_BACKEND", backend)
+    core = UniMMCore()
+    during: list[str] = []
+    loaded: list[str | None] = []
+
+    def query_cache(*_: object) -> None:
+        during.append(core.getCurrentConfigFromCache("Channel"))
+
+    core.events.configDefined.connect(query_cache)
+    core.events.propertyChanged.connect(query_cache)
+    core.events.systemConfigurationLoaded.connect(
+        lambda: loaded.append(core.getCurrentConfigFromCache("Channel"))
+    )
+
+    core.loadSystemConfiguration(str(mixed_cfg_path))
+
+    assert during == []
+    assert len(loaded) == 1

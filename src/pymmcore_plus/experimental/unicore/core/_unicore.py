@@ -5,7 +5,7 @@ import threading
 import warnings
 import weakref
 from collections.abc import Callable, Iterator, MutableMapping, Sequence
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from datetime import datetime
 from itertools import count
 from pathlib import Path
@@ -20,6 +20,7 @@ from typing import (
 )
 
 import numpy as np
+from psygnal import SignalGroup
 from typing_extensions import deprecated
 
 import pymmcore_plus._pymmcore as pymmcore
@@ -253,7 +254,10 @@ class UniMMCore(CMMCorePlus):
 
         cfg_path = str(fpath.resolve())
         try:
-            load_system_configuration(self, cfg_path, on_device_error)
+            # Like MMCore's own loader, announce the load once, when it is done:
+            # listeners reacting to each line would query a half-loaded system.
+            with self._events_held():
+                load_system_configuration(self, cfg_path, on_device_error)
         except Exception:
             # On failure, unload all devices to avoid leaving loaded but
             # uninitialized devices that could cause crashes
@@ -264,6 +268,20 @@ class UniMMCore(CMMCorePlus):
         self._last_sys_config = cfg_path
         # Emit system configuration loaded event
         self.events.systemConfigurationLoaded.emit()
+
+    @contextmanager
+    def _events_held(self) -> Iterator[None]:
+        """Suppress core events, on either signal backend."""
+        events = self.events
+        if isinstance(events, SignalGroup):
+            with events.blocked():
+                yield
+            return
+        was_blocked = events.blockSignals(True)  # type: ignore[attr-defined]
+        try:
+            yield
+        finally:
+            events.blockSignals(was_blocked)  # type: ignore[attr-defined]
 
     def saveSystemConfiguration(
         self, filename: str | Path, *, prefix_py_devices: bool = True
