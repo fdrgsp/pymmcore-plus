@@ -1,16 +1,19 @@
-"""Hardware autofocus: the Z search for lock, and the `autofocusFinished` signal."""
+"""Hardware autofocus: the Z search for lock, the `autofocusFinished` signal, and
+keeping continuous focus locked (`keep_locked`)."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import patch
 
+import pytest
 from useq import HardwareAutofocus, MDAEvent, MDASequence
 
 from pymmcore_plus.autofocus import AutofocusResult
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     import pymmcore_plus
 
@@ -239,3 +242,271 @@ def test_failed_autofocus_clears_pending_reengagement(
         _exec(core, _af_event())
     assert not core.mda.engine._af_succeeded
     assert not core.mda.engine._af_needs_reengage
+
+
+# -------------------------------- keep locked --------------------------------
+
+Call = tuple[str, tuple, bool]  # (method, args, continuous focus on at the time)
+
+
+@contextmanager
+def _scope(
+    core: pymmcore_plus.CMMCorePlus,
+    *,
+    on: bool = False,
+    locks: Literal["yes", "after_find", "no", "cancel"] = "yes",
+    finds: bool = True,
+    drift: float = 0.0,
+) -> Iterator[list[Call]]:
+    """Fake continuous focus, and record in order what the engine asks of it.
+
+    `locks` says when it locks once switched on: always, only after `fullFocus` at
+    the current XY position, never, or never and cancelling the acquisition.  Each
+    image taken while it is on moves Z by `drift`, as a lock following drift does.
+    """
+    calls: list[Call] = []
+    state = {"on": on, "found": False}
+
+    def record(name: str, *args: Any) -> None:
+        calls.append((name, args, state["on"]))
+
+    def enable(on: bool) -> None:
+        record("enableContinuousFocus", on)
+        state["on"] = on
+
+    def is_locked() -> bool:
+        if locks == "cancel" and state["on"]:
+            core.mda.cancel()
+        return state["on"] and (
+            locks == "yes" or (locks == "after_find" and state["found"])
+        )
+
+    def full_focus() -> None:
+        record("fullFocus")
+        if not finds:
+            raise RuntimeError("no focus")
+        state["found"] = True
+
+    def recorded(name: str, before: Callable[[], None] = lambda: None) -> Any:
+        original = getattr(core, name)
+
+        def _method(*args: Any) -> Any:
+            record(name, *args)
+            before()
+            return original(*args)
+
+        return _method
+
+    def new_xy() -> None:
+        state["found"] = False
+
+    def drifted() -> None:
+        if state["on"] and drift:
+            core.setPosition(core.getFocusDevice(), core.getZPosition() + drift)
+
+    core.mda.engine.lock_timeout = 0.05
+    with (
+        patch.object(core, "enableContinuousFocus", enable),
+        patch.object(core, "isContinuousFocusEnabled", lambda: state["on"]),
+        patch.object(core, "isContinuousFocusLocked", is_locked),
+        patch.object(core, "fullFocus", full_focus),
+        patch.object(core, "setXYPosition", recorded("setXYPosition", new_xy)),
+        patch.object(core, "setZPosition", recorded("setZPosition")),
+        patch.object(core, "setAutoFocusOffset", recorded("setAutoFocusOffset")),
+        patch.object(core, "snapImage", recorded("snapImage", drifted)),
+    ):
+        yield calls
+
+
+def _called(calls: list[Call], name: str) -> list[tuple[tuple, bool]]:
+    return [(args, on) for n, args, on in calls if n == name]
+
+
+def _locked_seq(axes: tuple[str, ...] = ("p",), z: float | None = 5.0) -> MDASequence:
+    """Two positions with their own offsets (1 and 2), two timepoints, `tp` order."""
+    plan = {"axes": axes, "keep_locked": True, "max_retries": 1}
+    return MDASequence(
+        axis_order="tpc",
+        time_plan={"interval": 0, "loops": 2},
+        stage_positions=[
+            {
+                "x": x,
+                "y": 0,
+                "z": z,
+                "sequence": {"autofocus_plan": {**plan, "autofocus_motor_offset": x}},
+            }
+            for x in (1.0, 2.0)
+        ],
+    )
+
+
+def _results(core: pymmcore_plus.CMMCorePlus) -> list[tuple[bool, bool, str]]:
+    """Collect (find_focus, succeeded, message) of every autofocus result."""
+    results: list[tuple[bool, bool, str]] = []
+    core.mda.events.autofocusFinished.connect(
+        lambda e, r: results.append((e.action.find_focus, r.succeeded, r.message))
+    )
+    return results
+
+
+def test_keep_locked_finds_on_its_axes(core: pymmcore_plus.CMMCorePlus) -> None:
+    results = _results(core)
+    with _scope(core) as calls:
+        core.mda.run(_locked_seq())
+
+    assert [r[:2] for r in results] == [(True, True)] * 4
+    assert len(_called(calls, "fullFocus")) == 4
+    # the lock is off for every move to a new position, and on for every image
+    xy = _called(calls, "setXYPosition")
+    moves = [
+        on for (args, on), (last, _) in zip(xy[1:], xy, strict=False) if args != last
+    ]
+    assert moves == [False] * 3
+    assert all(on for _, on in _called(calls, "snapImage"))
+    # Z is only ever moved with the lock off, and the lock is left as it was found
+    assert not any(on for _, on in _called(calls, "setZPosition"))
+    assert not core.isContinuousFocusEnabled()
+
+
+@pytest.mark.parametrize("on", [False, True])
+def test_keep_locked_holds_without_finding(
+    core: pymmcore_plus.CMMCorePlus, on: bool
+) -> None:
+    results = _results(core)
+    with _scope(core, on=on) as calls:
+        core.mda.run(_locked_seq(axes=()))
+        assert core.isContinuousFocusEnabled() is on
+
+    assert results == [(False, True, "")] * 4
+    assert not _called(calls, "fullFocus")
+    offsets = [args for args, _ in _called(calls, "setAutoFocusOffset")]
+    assert offsets == [(1.0,), (2.0,), (1.0,), (2.0,)]
+    assert all(on for _, on in _called(calls, "snapImage"))
+    # started off: Z is set once, before locking; started on: never
+    assert len(_called(calls, "setZPosition")) == (0 if on else 1)
+    switches = [args for args, _ in _called(calls, "enableContinuousFocus")]
+    assert switches == ([] if on else [(True,), (False,)])
+
+
+def test_keep_locked_hold_finds_when_it_cannot_lock(
+    core: pymmcore_plus.CMMCorePlus,
+) -> None:
+    results = _results(core)
+    with _scope(core, locks="after_find") as calls:
+        core.mda.run(_locked_seq(axes=()))
+
+    assert results == [(False, True, "")] * 4
+    assert len(_called(calls, "fullFocus")) == 4
+
+
+def test_keep_locked_gives_up_and_lets_z_move(
+    core: pymmcore_plus.CMMCorePlus,
+) -> None:
+    results = _results(core)
+    with _scope(core, locks="no", finds=False) as calls:
+        core.mda.run(_locked_seq(axes=()))
+
+    assert [r[:2] for r in results] == [(False, False)] * 4
+    # one find per hold, and the lock is switched off again after each
+    assert len(_called(calls, "fullFocus")) == 4
+    assert not any(on for _, on in _called(calls, "snapImage"))
+    # Z moves resume for the images (and before each find)
+    assert len(_called(calls, "setZPosition")) > 4
+
+
+def test_keep_locked_finds_when_a_tile_move_loses_the_lock(
+    core: pymmcore_plus.CMMCorePlus,
+) -> None:
+    """Grid tiles get no hold event: the wait after the move finds focus if needed."""
+    results = _results(core)
+    seq = MDASequence(
+        grid_plan={"rows": 1, "columns": 3},
+        autofocus_plan={"axes": (), "keep_locked": True, "max_retries": 1},
+    )
+    with _scope(core, locks="after_find") as calls:
+        core.mda.run(seq)
+
+    assert results == [(False, True, ""), (True, True, ""), (True, True, "")]
+    assert all(on for _, on in _called(calls, "snapImage"))
+
+
+def test_keep_locked_find_that_cannot_relock(core: pymmcore_plus.CMMCorePlus) -> None:
+    results = _results(core)
+    with _scope(core, locks="no") as calls:
+        core.mda.run(_locked_seq())
+
+    assert len(_called(calls, "fullFocus")) == 4  # never a second find
+    assert all(not ok and "did not lock" in msg for _, ok, msg in results)
+    assert not core.isContinuousFocusEnabled()
+
+
+def test_keep_locked_cancel_never_finds(core: pymmcore_plus.CMMCorePlus) -> None:
+    results = _results(core)
+    with _scope(core, locks="cancel") as calls:
+        core.mda.engine.lock_timeout = 5.0  # cancelling must end the wait, not this
+        core.mda.run(_locked_seq(axes=()))
+
+    assert not _called(calls, "fullFocus")
+    assert results == []
+
+
+@pytest.mark.parametrize(
+    ("z", "expected"), [(5.0, [5.0, 5.0, 6.0, 6.0]), (None, [1.0, 2.0])]
+)
+def test_keep_locked_find_starts_from_the_drifted_z(
+    core: pymmcore_plus.CMMCorePlus, z: float | None, expected: list[float]
+) -> None:
+    """Each image moves Z by 1 while locked; a later find there starts from it."""
+    core.setZPosition(0.0)
+    with _scope(core, drift=1.0) as calls:
+        core.mda.run(_locked_seq(z=z))
+
+    assert [args[0] for args, _ in _called(calls, "setZPosition")] == expected
+
+
+def test_keep_locked_no_burst_across_xy(core: pymmcore_plus.CMMCorePlus) -> None:
+    engine = core.mda.engine
+    engine.use_hardware_sequencing = True
+    seq = MDASequence(
+        grid_plan={"rows": 1, "columns": 3},
+        autofocus_plan={"axes": (), "keep_locked": True},
+    )
+    with (
+        patch.object(core, "isXYStageSequenceable", return_value=True),
+        patch.object(core, "getXYStageSequenceMaxLength", return_value=100),
+    ):
+        engine.setup_sequence(seq)
+        events = list(engine.event_iterator(seq))
+        # without keep_locked, the three tiles would be one burst
+        engine.setup_sequence(seq.replace(autofocus_plan=None))
+        assert len(list(engine.event_iterator(seq.replace(autofocus_plan=None)))) == 1
+
+    assert [len(getattr(e, "events", [e])) for e in events] == [1, 1, 1, 1]
+
+
+@pytest.mark.parametrize("on", [False, True])
+def test_keep_locked_restores_state_with_the_lock_off(
+    core: pymmcore_plus.CMMCorePlus, on: bool
+) -> None:
+    engine = core.mda.engine
+    engine.restore_initial_state = True
+    with (
+        _scope(core, on=on) as calls,
+        patch.object(
+            engine,
+            "_restore_initial_state",
+            lambda: calls.append(("restore", (), core.isContinuousFocusEnabled())),
+        ),
+    ):
+        core.mda.run(_locked_seq(axes=()))
+        assert core.isContinuousFocusEnabled() is on
+
+    names = [
+        (n, args) for n, args, _ in calls if n in ("restore", "enableContinuousFocus")
+    ]
+    assert names[-2:] == (
+        [("enableContinuousFocus", (False,)), ("restore", ())]
+        if not on
+        else [("restore", ()), ("enableContinuousFocus", (True,))]
+    )
+    assert _called(calls, "restore") == [((), False)]
