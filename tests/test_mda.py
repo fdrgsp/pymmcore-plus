@@ -209,6 +209,89 @@ def test_autofocus_reengage_once_per_position(
     assert len(true_calls) == 2
 
 
+Z_STACK = {"range": 2, "step": 1}
+OFF, ON = (False,), (True,)
+
+
+@pytest.mark.parametrize(
+    "positions, z_plan, expected",
+    [
+        ([{"z": 0}, {"z": 0}], Z_STACK, [OFF, OFF, ON]),
+        ([{"z": 0, "sequence": {"z_plan": Z_STACK}}, {"z": 0}], None, [OFF, OFF, ON]),
+        # a single plane is no stack: re-engage after each autofocus, as before
+        ([{"z": 0}, {"z": 0}], {"range": 0, "step": 1}, [OFF, ON, OFF, ON]),
+    ],
+)
+def test_autofocus_no_reengage_during_z_stack(
+    core: CMMCorePlus,
+    mock_fullfocus: Any,
+    positions: list,
+    z_plan: dict | None,
+    expected: list,
+) -> None:
+    """A lock holds Z: it stays off through the stacks and comes back at the end."""
+    mda = MDASequence(stage_positions=positions, z_plan=z_plan, autofocus_plan=AFPlan)
+
+    with (
+        patch.object(core, "isContinuousFocusLocked", return_value=True),
+        patch.object(core, "enableContinuousFocus") as mock_enable,
+    ):
+        core.mda.run(mda)
+
+    assert [c.args for c in mock_enable.call_args_list] == expected
+
+
+@pytest.mark.parametrize("stop", ["cancel", "error"])
+def test_autofocus_reengaged_when_z_stack_run_stops_early(
+    core: CMMCorePlus, mock_fullfocus: Any, stop: str
+) -> None:
+    mda = MDASequence(
+        stage_positions=[{"z": 0}, {"z": 0}], z_plan=Z_STACK, autofocus_plan=AFPlan
+    )
+    if stop == "cancel":
+        core.mda.events.frameReady.connect(lambda *_: core.mda.cancel())
+        ctx: Any = nullcontext()
+    else:
+        ctx = patch.object(
+            core.mda.engine, "exec_single_event", side_effect=RuntimeError("boom")
+        )
+
+    with (
+        patch.object(core, "isContinuousFocusLocked", return_value=True),
+        patch.object(core, "enableContinuousFocus") as mock_enable,
+        ctx,
+        pytest.raises(RuntimeError) if stop == "error" else nullcontext(),
+    ):
+        core.mda.run(mda)
+
+    assert [c.args for c in mock_enable.call_args_list] == [OFF, ON]
+
+
+@pytest.mark.parametrize("restore_error", [None, RuntimeError("boom")])
+def test_autofocus_reengaged_after_restoring_state(
+    core: CMMCorePlus, restore_error: Exception | None
+) -> None:
+    engine = core.mda.engine
+    engine._af_reengage_at_end = True
+    engine.restore_initial_state = True
+    engine._initial_state = {"exposure": 10}
+    calls: list = []
+
+    def _restore() -> None:
+        calls.append("restore")
+        if restore_error:
+            raise restore_error
+
+    with (
+        patch.object(engine, "_restore_initial_state", _restore),
+        patch.object(core, "enableContinuousFocus", side_effect=calls.append),
+        pytest.raises(RuntimeError) if restore_error else nullcontext(),
+    ):
+        engine.teardown_sequence(MDASequence())
+
+    assert calls == ["restore", True]
+
+
 def test_set_mda_fov(core: CMMCorePlus) -> None:
     """Test that the fov size is updated."""
     mda = MDASequence(

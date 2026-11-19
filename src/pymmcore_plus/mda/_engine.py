@@ -162,6 +162,9 @@ class MDAEngine(PMDAEngine):
         self.last_autofocus_result: AutofocusResult | None = None
         # Re-engage continuous focus once after each successful hardware autofocus.
         self._af_needs_reengage: bool = False
+        # A lock holds Z, so it stays off through Z stacks and is re-engaged at the end
+        self._af_hold_off: bool = False
+        self._af_reengage_at_end: bool = False
 
         # used for one_shot autofocus to store the z correction for each position index.
         # map of {position_index: z_correction}
@@ -256,6 +259,8 @@ class MDAEngine(PMDAEngine):
         # get if the autofocus is engaged at the start of the sequence
         self._af_was_engaged = core.isContinuousFocusLocked()
         self._af_needs_reengage = False
+        self._af_hold_off = self._af_was_engaged and _has_z_stack(sequence)
+        self._af_reengage_at_end = False
 
         # capture initial state if restoration is enabled
         if self.restore_initial_state is None:
@@ -505,8 +510,13 @@ class MDAEngine(PMDAEngine):
     def teardown_sequence(self, sequence: MDASequence) -> None:
         """Perform any teardown required after the sequence has been executed."""
         # restore initial state if enabled and state was captured
-        if self.restore_initial_state and self._initial_state:
-            self._restore_initial_state()
+        try:
+            if self.restore_initial_state and self._initial_state:
+                self._restore_initial_state()
+        finally:
+            core = self.mmcore
+            if self._af_reengage_at_end and not core.isContinuousFocusEnabled():
+                core.enableContinuousFocus(True)
 
     def _capture_state(self) -> StateDict:
         """Capture the current hardware state for later restoration."""
@@ -973,11 +983,12 @@ class MDAEngine(PMDAEngine):
 
         z_before = self._current_z()
         message = ""
+        self._af_reengage_at_end = self._af_hold_off
         try:
             # execute hardware autofocus
             new_correction = self._execute_autofocus(action)
             self._af_succeeded = True
-            self._af_needs_reengage = self._af_was_engaged
+            self._af_needs_reengage = self._af_was_engaged and not self._af_hold_off
         except RuntimeError as e:
             message = str(e)
             logger.warning(
@@ -1025,6 +1036,7 @@ class MDAEngine(PMDAEngine):
         # The same preparation a routine run on its own gets (live stopped, a
         # locked hardware autofocus switched off), so the two cannot drift apart.
         prepare_microscope(core, method)
+        self._af_reengage_at_end = False
 
         z_before = self._current_z()
         result: AutofocusResult | None = None
@@ -1391,6 +1403,14 @@ class ImagePayload(NamedTuple):
     image: NDArray
     event: MDAEvent
     metadata: FrameMetaV1 | SummaryMetaV1
+
+
+def _has_z_stack(sequence: MDASequence) -> bool:
+    """Return True if `sequence`, or any of its positions, steps through Z planes."""
+    subs = (p.sequence for p in sequence.stage_positions if p.sequence)
+    return any(
+        s.z_plan is not None and s.z_plan.num_positions() > 1 for s in (sequence, *subs)
+    )
 
 
 def _focus_search_positions(

@@ -245,8 +245,19 @@ def test_reports_the_focus_curve(
     assert results[0].scores == ((FOUND_Z, 1.0),)
 
 
+@pytest.mark.parametrize(
+    "positions",
+    [
+        [{"z": 0.0}],
+        # a hardware autofocus first must not turn the lock back on at the end
+        [{"z": 0.0, "sequence": {"autofocus_plan": {"axes": ("p",)}}}, {"z": 0.0}],
+    ],
+)
 def test_continuous_focus_is_switched_off_and_left_off(
-    core: pymmcore_plus.CMMCorePlus, fake_method: list
+    core: pymmcore_plus.CMMCorePlus,
+    fake_method: list,
+    mock_fullfocus: Any,
+    positions: list,
 ) -> None:
     """Re-engaging would pull focus off the position the routine just measured."""
     with (
@@ -255,7 +266,7 @@ def test_continuous_focus_is_switched_off_and_left_off(
     ):
         core.mda.run(
             useq.MDASequence(
-                stage_positions=[{"z": 0.0}],
+                stage_positions=positions,
                 z_plan={"range": 2.0, "step": 1.0},
                 autofocus_plan=_plan(),
             )
