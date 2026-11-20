@@ -5,15 +5,16 @@ import warnings
 import weakref
 from collections import defaultdict
 from contextlib import suppress
+from dataclasses import dataclass
 from functools import cache
-from itertools import groupby
+from itertools import chain, groupby
 from typing import TYPE_CHECKING, Literal, NamedTuple, cast
 
 import numpy as np
 import useq
 from useq import (
     AcquireImage,
-    AxesBasedAF,
+    AutoFocusPlan,
     HardwareAutofocus,
     MDAEvent,
     MDASequence,
@@ -42,14 +43,7 @@ from ._protocol import PMDAEngine
 from ._runner import RunState
 
 if TYPE_CHECKING:
-    from collections.abc import (
-        Callable,
-        Generator,
-        Iterable,
-        Iterator,
-        Mapping,
-        Sequence,
-    )
+    from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
     from typing import TypeAlias
 
     from numpy.typing import NDArray
@@ -132,8 +126,8 @@ class MDAEngine(PMDAEngine):
         default), a `TimeoutError` is raised. If `"warn"`, a warning is issued
         and `None` is yielded for any missing frames.
     lock_timeout : float
-        Seconds to wait for continuous focus (e.g. a Nikon PFS) to lock, when an
-        autofocus plan keeps it locked (`keep_locked`). By default, this is `5.0`.
+        Seconds to wait for continuous focus (e.g. a Nikon PFS) to lock after it is
+        switched on, after an XY move and after a Z excursion. By default, `5.0`.
     """
 
     def __init__(
@@ -166,29 +160,27 @@ class MDAEngine(PMDAEngine):
         # stored initial state for restoration (if restore_initial_state is True)
         self._initial_state: StateDict = {}
 
-        # used to check if the hardware autofocus is engaged when the sequence begins.
-        # if it is, we will re-engage it after the autofocus action (if successful).
+        # whether continuous focus was enabled when the sequence began. If it was, it
+        # is kept on (as `keep_locked` asks) and restored at the end.
         self._af_was_engaged: bool = False
         # used to store the success of the last _execute_autofocus call
         self._af_succeeded: bool = False
         # the result of the most recent autofocus event (hardware or software),
         # also emitted on the `autofocusFinished` signal.
         self.last_autofocus_result: AutofocusResult | None = None
-        # Re-engage continuous focus once after each successful hardware autofocus.
-        self._af_needs_reengage: bool = False
-        # A lock holds Z, so it stays off through Z stacks and is re-engaged at the end
-        self._af_hold_off: bool = False
-        self._af_reengage_at_end: bool = False
-
-        # With a `keep_locked` plan the engine keeps continuous focus locked itself:
-        # whether it is on now and was at the start, the last Z it held at each
-        # position, the previous event's index, and the last autofocus action.
+        self._may_lock: bool = False
+        # `keep_locked` of the last hardware autofocus action, for events without a
+        # sequence to find their autofocus plan in
         self._keep_locked: bool = False
-        self._lock_on: bool = False
-        self._initial_lock_on: bool = False
-        self._locked_z: dict[int | None, float] = {}
-        self._last_index: Mapping[str, int] = {}
-        self._locked_action: HardwareAutofocus | None = None
+        # where the last event imaged, where continuous focus could not lock (not
+        # retried there), and the event after the current one, if known
+        self._location: tuple | None = None
+        self._lock_failed_at: tuple | None = None
+        self._next_event: MDAEvent | None = None
+        # where continuous focus held the focus device, and the Z excursion away from
+        # it in progress, if any
+        self._reference: _Reference | None = None
+        self._excursion: _Reference | None = None
 
         # used for one_shot autofocus to store the z correction for each position index.
         # map of {position_index: z_correction}
@@ -281,18 +273,22 @@ class MDAEngine(PMDAEngine):
 
         self._update_config_device_props()
         # get if the autofocus is engaged at the start of the sequence
-        self._af_was_engaged = core.isContinuousFocusLocked()
-        self._af_needs_reengage = False
-        self._af_hold_off = self._af_was_engaged and _moves_z(sequence)
-        self._af_reengage_at_end = False
-        self._keep_locked = any(
-            isinstance(s.autofocus_plan, AxesBasedAF) and s.autofocus_plan.keep_locked
-            for s in _sequences(sequence)
+        self._af_was_engaged = core.isContinuousFocusEnabled()
+        # whether focus may be on at some event, so bursts must respect its changes
+        # (`_focus_boundary` also learns it from the actions of an event stream)
+        positions = (p.sequence for p in sequence.stage_positions)
+        self._may_lock = bool(core.getAutoFocusDevice()) and (
+            self._af_was_engaged
+            or any(
+                isinstance(seq.autofocus_plan, AutoFocusPlan)
+                and seq.autofocus_plan.keep_locked
+                for seq in (sequence, *positions)
+                if seq is not None
+            )
         )
-        self._lock_on = self._initial_lock_on = core.isContinuousFocusEnabled()
-        self._locked_z.clear()
-        self._last_index = {}
-        self._locked_action = None
+        self._keep_locked = False
+        self._location = self._lock_failed_at = self._next_event = None
+        self._reference = self._excursion = None
 
         # capture initial state if restoration is enabled
         if self.restore_initial_state is None:
@@ -356,28 +352,28 @@ class MDAEngine(PMDAEngine):
         event : MDAEvent
             The event to use for the Hardware config
         """
-        moved = self._keep_locked and self._before_locked_move(event)
+        self._prepare_focus(event)
         if isinstance(event, SequencedEvent):
             self.setup_sequenced_event(event)
         else:
             self.setup_single_event(event)
         self.mmcore.waitForSystem()
-        # an autofocus event waits for the lock itself
-        if moved and self._lock_on and not isinstance(event.action, HardwareAutofocus):
-            self._wait_after_move(event)
+        # a continuous-focus drive moved with focus on: the lock must settle there
+        if (
+            self._excursion is not None
+            and self.mmcore.isContinuousFocusEnabled()
+            and not self._wait_for_lock()
+            and not self._should_cancel()
+        ):
+            self._give_up_lock(_first(event))
 
     def exec_event(self, event: MDAEvent) -> Iterable[PImagePayload | None]:
         """Execute an individual event and return the image data."""
         action = getattr(event, "action", None)
-        core = self.mmcore
         if isinstance(action, (HardwareAutofocus, SoftwareAutofocus)):
             self._af_succeeded = False
-            self._af_needs_reengage = False
         if isinstance(action, HardwareAutofocus):
-            if action.keep_locked:
-                self._exec_locked_autofocus(event, action)
-            else:
-                self._exec_hardware_autofocus(event, action)
+            self._exec_hardware_autofocus(event, action)
             return
 
         if isinstance(action, SoftwareAutofocus):
@@ -391,12 +387,6 @@ class MDAEngine(PMDAEngine):
         if not isinstance(action, (AcquireImage, type(None))):
             return
 
-        # Re-engage once after successful hardware autofocus, after setup_event
-        # has moved the stage. Some devices retrigger on every enable call.
-        if self._af_needs_reengage:
-            core.enableContinuousFocus(True)
-            self._af_needs_reengage = False
-
         if isinstance(event, SequencedEvent):
             yield from self.exec_sequenced_event(event)
         else:
@@ -407,19 +397,21 @@ class MDAEngine(PMDAEngine):
 
         This wraps `for event in events: ...` inside `MDARunner.run()` and combines
         sequenceable events into an instance of `SequencedEvent` if
-        `self.use_hardware_sequencing` is `True`.
+        `self.use_hardware_sequencing` is `True`.  It also looks one event ahead, so
+        that `teardown_event` knows whether a Z excursion goes on.
         """
-        if not self.use_hardware_sequencing:
-            yield from events
-            return
-
-        if self._keep_locked:
-            # the lock must settle after each XY move: no burst may span one
-            for _, same_xy in groupby(events, key=lambda e: (e.x_pos, e.y_pos)):
-                yield from iter_sequenced_events(self.mmcore, same_xy)
-            return
-
-        yield from iter_sequenced_events(self.mmcore, events)
+        if self.use_hardware_sequencing:
+            # no burst may span a change of continuous focus
+            parts = groupby(events, key=self._focus_boundary)
+            events = chain.from_iterable(
+                iter_sequenced_events(self.mmcore, part) for _, part in parts
+            )
+        it = iter(events)
+        event = next(it, None)
+        while event is not None:
+            self._next_event = next(it, None)
+            yield event
+            event = self._next_event
 
     # ===================== Regular Events =====================
 
@@ -435,7 +427,7 @@ class MDAEngine(PMDAEngine):
 
         self._set_event_xy_position(event)
 
-        if event.z_pos is not None or self._keep_locked:
+        if event.z_pos is not None or self._excursion is not None:
             self._set_event_z(event)
         if event.slm_image is not None:
             self._set_event_slm_image(event)
@@ -551,22 +543,26 @@ class MDAEngine(PMDAEngine):
                 core.stopStageSequence(core.getFocusDevice())
             for dev, prop in event.property_sequences:
                 core.stopPropertySequence(dev, prop)
+        # end a Z excursion before the runner waits for, or asks for, the next event
+        if self._excursion is not None and not self._excursion_goes_on():
+            self._end_excursion(_first(event))
 
     def teardown_sequence(self, sequence: MDASequence) -> None:
         """Perform any teardown required after the sequence has been executed."""
-        # restore initial state if enabled and state was captured
+        core = self.mmcore
         try:
+            self._end_excursion()
+            # restore initial state if enabled and state was captured
             if self.restore_initial_state and self._initial_state:
-                if self._keep_locked and self._lock_on:
-                    self._set_lock(False)  # a lock would hold Z where it is
+                if self._focus_holds_z():
+                    core.enableContinuousFocus(False)
                 self._restore_initial_state()
         finally:
-            core = self.mmcore
-            if self._keep_locked:
-                if self._lock_on != self._initial_lock_on:
-                    self._set_lock(self._initial_lock_on)
-            elif self._af_reengage_at_end and not core.isContinuousFocusEnabled():
-                core.enableContinuousFocus(True)
+            try:
+                if core.isContinuousFocusEnabled() != self._af_was_engaged:
+                    core.enableContinuousFocus(self._af_was_engaged)
+            except Exception as e:
+                logger.warning("Failed to restore continuous focus. %s", e)
 
     def _capture_state(self) -> StateDict:
         """Capture the current hardware state for later restoration."""
@@ -729,7 +725,10 @@ class MDAEngine(PMDAEngine):
             zstage = core.getFocusDevice()
             with suppress(RuntimeError):
                 core.stopStageSequence(zstage)
-            core.loadStageSequence(zstage, event.z_sequence)
+            z_sequence = event.z_sequence
+            if self._excursion is not None:
+                z_sequence = tuple(self._z_target(e) for e in event.events)
+            core.loadStageSequence(zstage, z_sequence)
         if event.slm_sequence:
             slm = core.getSLMDevice()
             with suppress(RuntimeError):
@@ -779,7 +778,7 @@ class MDAEngine(PMDAEngine):
 
         if event.z_sequence:
             core.startStageSequence(core.getFocusDevice())
-        elif event.z_pos is not None:
+        elif event.z_pos is not None or self._excursion is not None:
             self._set_event_z(event)
 
         if event.exposure_sequence:
@@ -1024,95 +1023,45 @@ class MDAEngine(PMDAEngine):
     def _exec_hardware_autofocus(
         self, event: MDAEvent, action: HardwareAutofocus
     ) -> None:
-        """Run hardware autofocus for `event`, update state, and report the result."""
+        """Run hardware autofocus for `event`, update state, and report the result.
+
+        Continuous focus is switched back on afterwards if the action keeps it
+        locked, or if it was on when the sequence began.
+        """
         core = self.mmcore
         # skip if no autofocus device is found
         if not (af_device := core.getAutoFocusDevice()):
             logger.warning("No autofocus device found. Cannot execute autofocus.")
             return
 
+        if event.sequence is None:
+            self._keep_locked = action.keep_locked
+        self._reference = None
         z_before = self._current_z()
         message = ""
-        self._af_reengage_at_end = self._af_hold_off
         try:
             # execute hardware autofocus
             new_correction = self._execute_autofocus(action)
-            self._af_succeeded = True
-            self._af_needs_reengage = self._af_was_engaged and not self._af_hold_off
         except RuntimeError as e:
             message = str(e)
-            logger.warning(
-                "Hardware autofocus failed at position %r (z=%r). %s",
-                event.index.get("p"),
-                z_before,
-                e,
-            )
-            self._af_succeeded = False
         else:
             # store correction for this position index
             p_idx = event.index.get("p", None)
             self._z_correction[p_idx] = new_correction + self._z_correction.get(
                 p_idx, 0.0
             )
+            if (action.keep_locked or self._af_was_engaged) and not self._lock():
+                message = "Focus was found, but continuous focus did not lock."
 
-        self._emit_autofocus_finished(
-            event,
-            AutofocusResult(
-                kind="hardware",
-                method=af_device,
-                focus_device=core.getFocusDevice(),
-                z_before=z_before,
-                z_after=self._current_z(),
-                succeeded=self._af_succeeded,
-                message=message,
-            ),
-        )
-
-    def _exec_locked_autofocus(
-        self, event: MDAEvent, action: HardwareAutofocus
-    ) -> None:
-        """Hold or find focus for a plan that keeps continuous focus locked.
-
-        A hold moves the offset and waits for the lock.  A find (one the plan asked
-        for, or after a hold that could not lock) runs a full autofocus and locks
-        again.  If that fails too, continuous focus is switched off so Z moves
-        resume, and the next autofocus event tries again.  Cancelling never starts a
-        find.
-        """
-        core = self.mmcore
-        if not (af_device := core.getAutoFocusDevice()):
-            logger.warning("No autofocus device found. Cannot execute autofocus.")
-            return
-
-        self._locked_action = action
-        z_before = self._current_z()
-        message = ""
-        if not action.find_focus:
-            self._set_af_offset(action)
-        if action.find_focus or not self._lock():
-            if self._should_cancel():
-                return
-            self._lock_on = False  # _execute_autofocus switches it off
-            try:
-                self._execute_autofocus(action)
-            except RuntimeError as e:
-                message = str(e)
-            else:
-                if not self._lock():
-                    if self._should_cancel():
-                        return
-                    message = "Focus was found, but continuous focus did not lock."
-
+        self._af_succeeded = not message
         if message:
-            self._set_lock(False)
+            self._give_up_lock()
             logger.warning(
-                "Hardware autofocus failed at position %r. %s",
+                "Hardware autofocus failed at position %r (z=%r). %s",
                 event.index.get("p"),
+                z_before,
                 message,
             )
-        else:
-            self._locked_z[event.index.get("p")] = self._current_z()
-        self._af_succeeded = not message
         self._emit_autofocus_finished(
             event,
             AutofocusResult(
@@ -1126,39 +1075,173 @@ class MDAEngine(PMDAEngine):
             ),
         )
 
-    def _before_locked_move(self, event: MDAEvent) -> bool:
-        """Remember the Z the lock held, and unlock before moving to find focus.
+    def _prepare_focus(self, event: MDAEvent) -> None:
+        """Keep continuous focus where `event` images, and start its Z excursion.
 
-        Returns True if `event` is at another position or grid tile than the last.
+        While continuous focus is on, or the event's autofocus plan wants it on, an
+        XY move applies the plan's autofocus offset and waits for the lock.  An image
+        that is not at the Z the lock holds (a Z stack plane, a channel Z offset) is
+        a Z excursion: see `_start_excursion`.
         """
-        index, last = event.index, self._last_index
-        self._last_index = index
-        moved = not last or any(index.get(ax) != last.get(ax) for ax in ("p", "g"))
+        core = self.mmcore
+        event = _first(event)
+        location = _location(event)
+        if moved := location != self._location:
+            self._location, self._lock_failed_at = location, None
         action = event.action
-        find = isinstance(action, HardwareAutofocus) and action.find_focus
-        if self._lock_on and last and (moved or find):
-            # includes any drift the lock followed since the last autofocus here
-            self._locked_z[last.get("p")] = self._current_z()
-        if self._lock_on and find:
-            self._set_lock(False)
-        return moved
-
-    def _wait_after_move(self, event: MDAEvent) -> None:
-        """Wait for the lock after an XY move; find focus again if it is lost."""
-        if self._wait_for_lock() or self._should_cancel() or not self._locked_action:
+        if not isinstance(action, (AcquireImage, type(None))):
+            # a search starts from the position's own Z, which a lock would hold
+            if isinstance(action, (HardwareAutofocus, SoftwareAutofocus)):
+                if self._focus_holds_z():
+                    core.enableContinuousFocus(False)
             return
-        find = self._locked_action.model_copy(update={"find_focus": True})
-        self._exec_locked_autofocus(event.model_copy(update={"action": find}), find)
+
+        if self._reference is not None and not _is_excursion(event):
+            self._reference = None  # a later excursion starts from where focus is
+        on = core.isContinuousFocusEnabled()
+        if (
+            self._excursion is None  # one that goes on keeps focus as it is
+            and location != self._lock_failed_at
+            and (on or self._wants_lock(event))
+        ):
+            if moved:
+                self._set_event_xy_position(event)
+                core.waitForSystem()
+                if isinstance(plan := _autofocus_plan(event), AutoFocusPlan):
+                    self._set_af_offset(plan.as_action())
+            if moved or not on:
+                self._lock_or_recover(event)
+        if (
+            self._excursion is not None or core.isContinuousFocusEnabled()
+        ) and _is_excursion(event):
+            self._start_excursion(event)
+
+    def _wants_lock(self, event: MDAEvent) -> bool:
+        """Return True if continuous focus should be on where `event` images."""
+        if not self.mmcore.getAutoFocusDevice():
+            return False
+        plan = _autofocus_plan(event)
+        if isinstance(plan, AutoFocusPlan):
+            return plan.keep_locked or self._af_was_engaged
+        if plan is None:
+            keep = self._keep_locked if event.sequence is None else False
+            return keep or self._af_was_engaged
+        return False  # a software routine switches continuous focus off
+
+    def _focus_boundary(self, event: MDAEvent) -> tuple | None:
+        """Return what must not change within a burst while focus may be on.
+
+        Bursts are planned ahead of execution, in event order, so an action that
+        will switch focus on counts from here on.
+        """
+        action = event.action
+        if isinstance(action, HardwareAutofocus) and action.keep_locked:
+            self._may_lock = bool(self.mmcore.getAutoFocusDevice())
+        return (_block(event), _is_excursion(event)) if self._may_lock else None
 
     def _lock(self) -> bool:
         """Switch continuous focus on (if off), and wait for it to lock."""
-        if not self._lock_on:
-            self._set_lock(True)
+        if not self.mmcore.isContinuousFocusEnabled():
+            self.mmcore.enableContinuousFocus(True)
         return self._wait_for_lock()
 
-    def _set_lock(self, on: bool) -> None:
-        self.mmcore.enableContinuousFocus(on)
-        self._lock_on = on
+    def _lock_or_recover(self, event: MDAEvent) -> None:
+        """Lock continuous focus; if it does not lock, search for focus once.
+
+        The search uses the autofocus plan of `event` and starts from its
+        position's own Z.  Without a hardware plan, or if the search fails too,
+        continuous focus is switched off and not retried at this location.
+        """
+        if self._lock() or self._should_cancel():
+            return
+        core = self.mmcore
+        core.enableContinuousFocus(False)
+        if not isinstance(plan := _autofocus_plan(event), AutoFocusPlan):
+            self._give_up_lock(event)
+            return
+        af_event = plan.autofocus_event(event)
+        if af_event.z_pos is not None:
+            self._set_event_z(af_event)
+            core.waitForSystem()
+        self._exec_hardware_autofocus(af_event, plan.as_action())
+
+    def _give_up_lock(self, event: MDAEvent | None = None) -> None:
+        """Warn and continue: switch continuous focus off, not to retry it here.
+
+        Ordinary Z moves resume until the next location or autofocus search.
+        """
+        if self.mmcore.isContinuousFocusEnabled():
+            self.mmcore.enableContinuousFocus(False)
+        self._lock_failed_at = self._location
+        if event is not None:
+            logger.warning(
+                "Continuous focus did not lock at position %r.", event.index.get("p")
+            )
+
+    def _focus_holds_z(self) -> bool:
+        """Return True if continuous focus is on and would hold the focus device."""
+        core = self.mmcore
+        return bool(
+            (device := core.getFocusDevice())
+            and core.isContinuousFocusEnabled()
+            and not core.isContinuousFocusDrive(device)
+        )
+
+    def _start_excursion(self, event: MDAEvent) -> None:
+        """Leave the Z that continuous focus holds, for `event`'s planes.
+
+        The focus device's position there is the reference the planes are relative
+        to, sampled once per timepoint and location.  An ordinary drive cannot move
+        while continuous focus holds it, so focus is switched off until
+        `_end_excursion`; a continuous-focus drive (e.g. a PFS offset) moves with
+        focus on.
+        """
+        core = self.mmcore
+        if not (device := core.getFocusDevice()):
+            return
+        block = _block(event)
+        if (excursion := self._excursion) is not None:
+            if (excursion.device, excursion.block) == (device, block):
+                return
+            self._end_excursion(event)
+        ref = self._reference
+        if ref is None or (ref.device, ref.block) != (device, block):
+            ref = self._reference = _Reference(block, device, core.getPosition(device))
+        if self._focus_holds_z():
+            core.enableContinuousFocus(False)
+            ref.suspended = True
+        self._excursion = ref
+
+    def _excursion_goes_on(self) -> bool:
+        """Return True if the next event continues the current Z excursion."""
+        if self._next_event is None or self._excursion is None:
+            return False
+        nxt = _first(self._next_event)
+        return _is_excursion(nxt) and _block(nxt) == self._excursion.block
+
+    def _end_excursion(self, event: MDAEvent | None = None) -> None:
+        """Return the focus device to the reference, and lock focus again there.
+
+        Without an `event` (at the end of the sequence) focus is not locked again.
+        """
+        if (excursion := self._excursion) is None:
+            return
+        self._excursion = None
+        core = self.mmcore
+        core.setPosition(excursion.device, excursion.z)
+        core.waitForDevice(excursion.device)
+        relock = excursion.suspended or core.isContinuousFocusEnabled()
+        excursion.suspended = False
+        if event is not None and relock:
+            self._lock_or_recover(event)
+
+    def _z_target(self, event: MDAEvent) -> float:
+        """Return the Z of `event` during the current Z excursion."""
+        plans = _plans(event)
+        if plans is None or _absolute_z(event, plans):
+            p_idx = event.index.get("p", None)
+            return cast("float", event.z_pos) + self._z_correction.get(p_idx, 0.0)
+        return cast("_Reference", self._excursion).z + plans.z_shift
 
     def _wait_for_lock(self) -> bool:
         """Wait up to `lock_timeout` for continuous focus to lock.
@@ -1203,7 +1286,7 @@ class MDAEngine(PMDAEngine):
         # The same preparation a routine run on its own gets (live stopped, a
         # locked hardware autofocus switched off), so the two cannot drift apart.
         prepare_microscope(core, method)
-        self._af_reengage_at_end = False
+        self._reference = None
 
         z_before = self._current_z()
         result: AutofocusResult | None = None
@@ -1429,16 +1512,12 @@ class MDAEngine(PMDAEngine):
             logger.warning("No Z stage device found. Cannot set Z position.")
             return
 
+        if self._excursion is not None:
+            self.mmcore.setZPosition(self._z_target(_first(event)))
+            return
+        if self._focus_holds_z():
+            return
         p_idx = event.index.get("p", None)
-        if self._keep_locked:
-            # the lock holds Z; while it is off, go back to the last Z it held here
-            if self._lock_on:
-                return
-            if (locked_z := self._locked_z.get(p_idx)) is not None:
-                self.mmcore.setZPosition(locked_z)
-                return
-            if event.z_pos is None:
-                return
         correction = self._z_correction.setdefault(p_idx, 0.0)
         self.mmcore.setZPosition(cast("float", event.z_pos) + correction)
 
@@ -1572,18 +1651,56 @@ class ImagePayload(NamedTuple):
     metadata: FrameMetaV1 | SummaryMetaV1
 
 
-def _sequences(sequence: MDASequence) -> tuple[MDASequence, ...]:
-    """Return `sequence` and the sub-sequences of its positions."""
-    return (sequence, *(p.sequence for p in sequence.stage_positions if p.sequence))
+@dataclass
+class _Reference:
+    """Where continuous focus held the focus device, before a Z excursion."""
+
+    block: tuple  # the timepoint and location the excursion belongs to
+    device: str
+    z: float
+    suspended: bool = False  # continuous focus was switched off for the excursion
 
 
-def _moves_z(sequence: MDASequence) -> bool:
-    """Return True if `sequence` or a position has a Z stack or a channel Z offset."""
-    return any(
-        (s.z_plan is not None and s.z_plan.num_positions() > 1)
-        or any(c.z_offset for c in s.channels)
-        for s in _sequences(sequence)
-    )
+def _first(event: MDAEvent) -> MDAEvent:
+    """Return the first event of a burst, or `event` itself."""
+    return event.events[0] if isinstance(event, SequencedEvent) else event
+
+
+def _location(event: MDAEvent) -> tuple:
+    return (event.index.get("p"), event.index.get("g"), event.x_pos, event.y_pos)
+
+
+def _block(event: MDAEvent) -> tuple:
+    return (event.index.get("t"), *_location(event))
+
+
+def _plans(event: MDAEvent) -> useq.EventPlans | None:
+    return None if event.sequence is None else event.sequence.plans_at(event.index)
+
+
+def _autofocus_plan(event: MDAEvent) -> useq.AnyAutofocusPlan | None:
+    return None if (plans := _plans(event)) is None else plans.autofocus_plan
+
+
+def _absolute_z(event: MDAEvent, plans: useq.EventPlans) -> bool:
+    """Return True if `event` is a plane of an absolute Z plan."""
+    z_plan = plans.z_plan
+    return z_plan is not None and not z_plan.is_relative and "z" in event.index
+
+
+def _is_excursion(event: MDAEvent) -> bool:
+    """Return True if image `event` is not at the Z that continuous focus holds.
+
+    Every plane of a Z stack is (its middle one included), and every image with a
+    channel Z offset.  Without a sequence to tell, any requested Z is.
+    """
+    if not isinstance(event.action, (AcquireImage, type(None))):
+        return False
+    if (plans := _plans(event)) is None:
+        return event.z_pos is not None
+    z_plan = plans.z_plan
+    in_stack = z_plan is not None and z_plan.num_positions() > 1 and "z" in event.index
+    return in_stack or plans.z_shift != 0 or _absolute_z(event, plans)
 
 
 def _focus_search_positions(

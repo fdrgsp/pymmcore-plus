@@ -245,19 +245,8 @@ def test_reports_the_focus_curve(
     assert results[0].scores == ((FOUND_Z, 1.0),)
 
 
-@pytest.mark.parametrize(
-    "positions",
-    [
-        [{"z": 0.0}],
-        # a hardware autofocus first must not turn the lock back on at the end
-        [{"z": 0.0, "sequence": {"autofocus_plan": {"axes": ("p",)}}}, {"z": 0.0}],
-    ],
-)
 def test_continuous_focus_is_switched_off_and_left_off(
-    core: pymmcore_plus.CMMCorePlus,
-    fake_method: list,
-    mock_fullfocus: Any,
-    positions: list,
+    core: pymmcore_plus.CMMCorePlus, fake_method: list
 ) -> None:
     """Re-engaging would pull focus off the position the routine just measured."""
     with (
@@ -266,13 +255,47 @@ def test_continuous_focus_is_switched_off_and_left_off(
     ):
         core.mda.run(
             useq.MDASequence(
-                stage_positions=positions,
+                stage_positions=[{"z": 0.0}],
                 z_plan={"range": 2.0, "step": 1.0},
                 autofocus_plan=_plan(),
             )
         )
     assert mock_af.call_args_list
     assert all(call.args == (False,) for call in mock_af.call_args_list)
+
+
+def test_only_a_keep_locked_position_locks_again(
+    core: pymmcore_plus.CMMCorePlus, fake_method: list, mock_fullfocus: Any
+) -> None:
+    """A position with its own hardware plan keeps the lock; the software one does
+    not get it back, so its images stay where the routine measured."""
+    on = {"value": False}
+    locked_snaps: list[bool] = []
+    snap = core.snapImage
+
+    def _snap() -> None:
+        locked_snaps.append(on["value"])
+        snap()
+
+    locked = {"axes": ("p",), "keep_locked": True}
+    with (
+        patch.object(core, "enableContinuousFocus", lambda v: on.update(value=v)),
+        patch.object(core, "isContinuousFocusEnabled", lambda: on["value"]),
+        patch.object(core, "isContinuousFocusLocked", lambda: on["value"]),
+        patch.object(core, "snapImage", _snap),
+    ):
+        core.mda.run(
+            useq.MDASequence(
+                axis_order="tpc",
+                time_plan={"interval": 0, "loops": 2},
+                stage_positions=[
+                    {"z": 0.0, "sequence": {"autofocus_plan": locked}},
+                    {"z": 0.0},
+                ],
+                autofocus_plan=_plan(),
+            )
+        )
+    assert locked_snaps == [True, False, True, False]
 
 
 def test_software_autofocus_events_are_not_sequenced(
