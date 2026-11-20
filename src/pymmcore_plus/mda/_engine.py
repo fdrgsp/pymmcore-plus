@@ -274,18 +274,9 @@ class MDAEngine(PMDAEngine):
         self._update_config_device_props()
         # get if the autofocus is engaged at the start of the sequence
         self._af_was_engaged = core.isContinuousFocusEnabled()
-        # whether focus may be on at some event, so bursts must respect its changes
-        # (`_focus_boundary` also learns it from the actions of an event stream)
-        positions = (p.sequence for p in sequence.stage_positions)
-        self._may_lock = bool(core.getAutoFocusDevice()) and (
-            self._af_was_engaged
-            or any(
-                isinstance(seq.autofocus_plan, AutoFocusPlan)
-                and seq.autofocus_plan.keep_locked
-                for seq in (sequence, *positions)
-                if seq is not None
-            )
-        )
+        # whether focus may be on, so bursts must respect its changes (see
+        # `_focus_boundary`, which also learns it from the events)
+        self._may_lock = self._af_was_engaged and bool(core.getAutoFocusDevice())
         self._keep_locked = False
         self._location = self._lock_failed_at = self._next_event = None
         self._reference = self._excursion = None
@@ -1131,12 +1122,14 @@ class MDAEngine(PMDAEngine):
     def _focus_boundary(self, event: MDAEvent) -> tuple | None:
         """Return what must not change within a burst while focus may be on.
 
-        Bursts are planned ahead of execution, in event order, so an action that
-        will switch focus on counts from here on.
+        Bursts are planned ahead of execution, in event order, so a keep-locked
+        plan or action that will switch focus on counts from its event on.
         """
-        action = event.action
-        if isinstance(action, HardwareAutofocus) and action.keep_locked:
-            self._may_lock = bool(self.mmcore.getAutoFocusDevice())
+        if not self._may_lock and self.mmcore.getAutoFocusDevice():
+            self._may_lock = any(
+                isinstance(x, (HardwareAutofocus, AutoFocusPlan)) and x.keep_locked
+                for x in (event.action, _autofocus_plan(event))
+            )
         return (_block(event), _is_excursion(event)) if self._may_lock else None
 
     def _lock(self) -> bool:

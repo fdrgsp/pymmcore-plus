@@ -788,6 +788,8 @@ def test_bursts_respect_focus_boundaries(core: pymmcore_plus.CMMCorePlus) -> Non
         assert burst_sizes(mixed) == [1, 1, 1, 1]
         assert burst_sizes(stream) == [1, 1, 1]
         assert burst_sizes(stream[1:]) == [2]
+        # events from a sequence carry its plans, whether run as one or as a list
+        assert burst_sizes(list(offset)) == burst_sizes(offset)
         assert burst_sizes(two_stacks) == [3, 3]  # relocked between timepoints
 
         with _scope(core, on=True) as calls:
