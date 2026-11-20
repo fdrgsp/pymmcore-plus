@@ -1130,7 +1130,11 @@ class MDAEngine(PMDAEngine):
                 isinstance(x, (HardwareAutofocus, AutoFocusPlan)) and x.keep_locked
                 for x in (event.action, _autofocus_plan(event))
             )
-        return (_block(event), _is_excursion(event)) if self._may_lock else None
+        if not self._may_lock:
+            return None
+        # an excursion ends at each timepoint; the lock holds across them
+        excursion = _is_excursion(event)
+        return (_block(event) if excursion else _location(event), excursion)
 
     def _lock(self) -> bool:
         """Switch continuous focus on (if off), and wait for it to lock."""

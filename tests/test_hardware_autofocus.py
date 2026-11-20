@@ -774,6 +774,7 @@ def test_bursts_respect_focus_boundaries(core: pymmcore_plus.CMMCorePlus) -> Non
         MDAEvent(index={"p": 1}, z_pos=7.0),
     ]
     two_stacks = stack.replace(time_plan={"interval": 0, "loops": 2})
+    time_lapse = offset.replace(channels=[FITC], time_plan={"interval": 0, "loops": 3})
 
     def burst_sizes(events: Any) -> list[int]:
         engine.setup_sequence(
@@ -791,6 +792,7 @@ def test_bursts_respect_focus_boundaries(core: pymmcore_plus.CMMCorePlus) -> Non
         # events from a sequence carry its plans, whether run as one or as a list
         assert burst_sizes(list(offset)) == burst_sizes(offset)
         assert burst_sizes(two_stacks) == [3, 3]  # relocked between timepoints
+        assert burst_sizes(time_lapse) == [3]  # the lock holds across timepoints
 
         with _scope(core, on=True) as calls:
             core.mda.run(stack)
