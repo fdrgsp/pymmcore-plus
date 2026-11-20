@@ -283,7 +283,7 @@ class MDAEngine(PMDAEngine):
         # get if the autofocus is engaged at the start of the sequence
         self._af_was_engaged = core.isContinuousFocusLocked()
         self._af_needs_reengage = False
-        self._af_hold_off = self._af_was_engaged and _has_z_stack(sequence)
+        self._af_hold_off = self._af_was_engaged and _moves_z(sequence)
         self._af_reengage_at_end = False
         self._keep_locked = any(
             isinstance(s.autofocus_plan, AxesBasedAF) and s.autofocus_plan.keep_locked
@@ -1577,10 +1577,11 @@ def _sequences(sequence: MDASequence) -> tuple[MDASequence, ...]:
     return (sequence, *(p.sequence for p in sequence.stage_positions if p.sequence))
 
 
-def _has_z_stack(sequence: MDASequence) -> bool:
-    """Return True if `sequence`, or any of its positions, steps through Z planes."""
+def _moves_z(sequence: MDASequence) -> bool:
+    """Return True if `sequence` or a position has a Z stack or a channel Z offset."""
     return any(
-        s.z_plan is not None and s.z_plan.num_positions() > 1
+        (s.z_plan is not None and s.z_plan.num_positions() > 1)
+        or any(c.z_offset for c in s.channels)
         for s in _sequences(sequence)
     )
 

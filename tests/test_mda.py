@@ -211,6 +211,7 @@ def test_autofocus_reengage_once_per_position(
 
 Z_STACK = {"range": 2, "step": 1}
 OFF, ON = (False,), (True,)
+CH_OFFSET = {"config": "DAPI", "z_offset": 10}
 
 
 @pytest.mark.parametrize(
@@ -218,6 +219,11 @@ OFF, ON = (False,), (True,)
     [
         ([{"z": 0}, {"z": 0}], Z_STACK, [OFF, OFF, ON]),
         ([{"z": 0, "sequence": {"z_plan": Z_STACK}}, {"z": 0}], None, [OFF, OFF, ON]),
+        (
+            [{"z": 0, "sequence": {"channels": [CH_OFFSET]}}, {"z": 0}],
+            None,
+            [OFF, OFF, ON],
+        ),
         # a single plane is no stack: re-engage after each autofocus, as before
         ([{"z": 0}, {"z": 0}], {"range": 0, "step": 1}, [OFF, ON, OFF, ON]),
     ],
@@ -229,7 +235,7 @@ def test_autofocus_no_reengage_during_z_stack(
     z_plan: dict | None,
     expected: list,
 ) -> None:
-    """A lock holds Z: it stays off through the stacks and comes back at the end."""
+    """A lock holds Z: it stays off through the run and comes back at the end."""
     mda = MDASequence(stage_positions=positions, z_plan=z_plan, autofocus_plan=AFPlan)
 
     with (
