@@ -53,6 +53,7 @@ class OmeWritersSink(SinkProtocol):
         # True when frames are stored along a single unbounded axis, which
         # loses each frame's channel/position/z: the event is stored instead.
         self._store_events = False
+        self._frame_metadata: list[dict[str, Any] | None] = []
 
     @property
     def settings(self) -> AcquisitionSettings:
@@ -81,6 +82,16 @@ class OmeWritersSink(SinkProtocol):
         Known after `setup()`.
         """
         return self._store_events
+
+    @property
+    def frame_metadata(self) -> list[dict[str, Any] | None]:
+        """Per-frame metadata as written, in acquisition order.
+
+        Entry *n* is the `frame_meta_to_ome` dict written with the *n*-th frame
+        slot, or `None` for a skipped slot. `setup()` starts a new list, so one
+        held from an earlier run is left intact. Do not mutate it.
+        """
+        return self._frame_metadata
 
     @property
     def stream(self) -> OMEStream | None:
@@ -178,16 +189,17 @@ class OmeWritersSink(SinkProtocol):
         self._settings = AcquisitionSettings.model_validate(new_settings)
         self._stream = create_stream(self._settings)
         self._summary_meta = meta
+        self._frame_metadata = []
         self._set_summary_metadata()
 
     def append(self, img: np.ndarray, event: MDAEvent, meta: FrameMetaV1) -> None:
-        self._stream.append(  # type: ignore[union-attr]
-            img,
-            frame_metadata=frame_meta_to_ome(meta, include_event=self._store_events),
-        )
+        frame_meta = frame_meta_to_ome(meta, include_event=self._store_events)
+        self._stream.append(img, frame_metadata=frame_meta)  # type: ignore[union-attr]
+        self._frame_metadata.append(frame_meta)
 
     def skip(self, *, frames: int = 1) -> None:
         self._stream.skip(frames=frames)  # type: ignore[union-attr]
+        self._frame_metadata.extend([None] * frames)
 
     def close(self) -> None:
         if self._stream is not None:

@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
 
 import pytest
 import useq
 from ome_writers import AcquisitionSettings
+from useq import MDAEvent
 
 from pymmcore_plus.mda._runner import MDARunner
 from pymmcore_plus.mda._sink import OmeWritersSink
+from pymmcore_plus.metadata import summary_metadata
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -71,6 +73,54 @@ def test_sink_skip_delegates_to_stream() -> None:
     sink._stream = mock_stream
     sink.skip(frames=3)
     mock_stream.skip.assert_called_once_with(frames=3)
+
+
+@pytest.mark.parametrize("store_events", [False, True])
+def test_sink_frame_metadata_records_appends_and_skips(store_events: bool) -> None:
+    sink = OmeWritersSink(AcquisitionSettings(root_path="/tmp/x.ome.zarr"))
+    sink._stream = Mock()
+    sink._store_events = store_events
+    meta: Any = {"runner_time_ms": 1500, "exposure_ms": 10, "mda_event": MDAEvent()}
+
+    sink.append(Mock(), MDAEvent(), meta)
+    sink.skip(frames=2)
+    sink.append(Mock(), MDAEvent(), {**meta, "runner_time_ms": 2500})
+
+    first, *skipped, last = sink.frame_metadata
+    assert skipped == [None, None]
+    assert (first["delta_t"], last["delta_t"]) == (1.5, 2.5)
+    assert ("mda_event" in first) is store_events
+    # each entry is exactly what the stream was given
+    written = [c.kwargs["frame_metadata"] for c in sink._stream.append.call_args_list]
+    assert written == [first, last]
+
+
+def test_sink_frame_metadata_skips_failed_writes() -> None:
+    sink = OmeWritersSink(AcquisitionSettings(root_path="/tmp/x.ome.zarr"))
+    sink._stream = Mock()
+    sink._stream.append.side_effect = RuntimeError
+    sink._stream.skip.side_effect = RuntimeError
+    meta: Any = {"runner_time_ms": 0, "exposure_ms": 10}
+
+    with pytest.raises(RuntimeError):
+        sink.append(Mock(), MDAEvent(), meta)
+    with pytest.raises(RuntimeError):
+        sink.skip()
+    assert sink.frame_metadata == []
+
+
+def test_sink_setup_starts_a_new_frame_metadata_list(core: CMMCorePlus) -> None:
+    seq = useq.MDASequence(time_plan=useq.TIntervalLoops(interval=0, loops=2))
+    core.mda.run(seq, output="memory")
+    sink = core.mda.get_sink()
+    assert isinstance(sink, OmeWritersSink)
+    first_run = sink.frame_metadata
+    assert len(first_run) == 2
+
+    sink.setup(seq, summary_metadata(core, mda_sequence=seq))
+    assert sink.frame_metadata == []
+    assert len(first_run) == 2
+    sink.close()
 
 
 # --- MDARunner integration tests ---
