@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from pymmcore_plus import CMMCorePlus, configure_logging
+from pymmcore_plus import CMMCorePlus, _logger, configure_logging
 from pymmcore_plus._logger import core_logfile, logger
 
 if TYPE_CHECKING:
@@ -47,6 +47,10 @@ def test_core_log_has_its_own_file(log_file: Path) -> None:
 def test_core_log_rotates_by_itself(log_file: Path) -> None:
     configure_logging(file=log_file, log_to_stderr=False, file_rotation=1)
     core = CMMCorePlus()
+    # Windows cannot rename a file other cores (left by earlier tests) hold open
+    for other in list(_logger._CORES):
+        if other is not core:
+            other.setPrimaryLogFile("")
     for i in range(20_000):  # well over 1 MB
         core.logMessage(f"core entry {i:05d} {'x' * 40}")
     core.logMessage("the last one")
