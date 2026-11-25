@@ -51,7 +51,9 @@ def test_core_log_rotates_by_itself(log_file: Path) -> None:
     for other in list(_logger._CORES):
         if other is not core:
             other.setPrimaryLogFile("")
-    for i in range(20_000):  # well over 1 MB
+    # one rotation only: MMCore names rotated files to the second, and Windows
+    # cannot rename onto the first one again within that second
+    for i in range(11_000):  # ~1.2 MB
         core.logMessage(f"core entry {i:05d} {'x' * 40}")
     core.logMessage("the last one")
     _flush(core)
