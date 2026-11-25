@@ -371,36 +371,40 @@ def logs(
     reveal: bool = typer.Option(
         False, "--reveal", help="Reveal log file in Explorer/Finder."
     ),
+    core: bool = typer.Option(
+        False, "--core", help="Show MMCore's own log (CoreLog) instead."
+    ),
 ) -> None:
     """Display recent output from pymmcore-plus log."""
     # NOTE: technically LOG_FILE may not be the active log if the user configured
     # logging manually. But this is a reasonable default.  To really know this, in
     # a cross-process safe way, we would need to write the path to the active log file
     # in a file in the user data directory.
-    from ._logger import LOG_FILE
+    from ._logger import LOG_FILE, core_logfile
 
-    if not LOG_FILE or not LOG_FILE.exists():
+    log_file = core_logfile(LOG_FILE) if core and LOG_FILE else LOG_FILE
+    if not log_file or not log_file.exists():
         print(":sparkles: [bold green]No log file.")
         raise typer.Exit(0)
 
     if reveal:  # pragma: no cover
         if os.name == "nt":  # Windows
-            subprocess.run(["explorer", "/select,", str(LOG_FILE)])
+            subprocess.run(["explorer", "/select,", str(log_file)])
         elif os.name == "posix":  # macOS or Linux
-            subprocess.run(["open", "-R", str(LOG_FILE)])
+            subprocess.run(["open", "-R", str(log_file)])
 
         raise typer.Exit(0)
 
     if clear:
-        for f in LOG_FILE.parent.glob("*.log"):
+        for f in log_file.parent.glob("*.log"):
             f.unlink()
             print(f":wastebasket: [bold red] Cleared log file {f}")
         raise typer.Exit(0)
 
     if tail:
-        _tail_file(LOG_FILE)
+        _tail_file(log_file)
     else:
-        with open(LOG_FILE) as fh:
+        with open(log_file) as fh:
             lines = fh.readlines()
         if num:
             lines = lines[-num:]

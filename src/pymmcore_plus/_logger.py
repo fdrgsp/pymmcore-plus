@@ -61,32 +61,25 @@ class CustomFormatter(logging.Formatter):
 # cores whose CoreLog follows the log file (see `log_core_to_file`)
 _CORES: weakref.WeakSet[CMMCore] = weakref.WeakSet()
 _CORES_LOCK = threading.Lock()
+# where they write it: (file, rotation size in bytes, backups); "" for nowhere
+_core_log: tuple[str, int, int] = ("", 0, 0)
 
 
-def _move_cores(old: str, new: str) -> list[CMMCore]:
-    """Point the cores' CoreLog at `new` where it is `old` ("" is no file)."""
-    with _CORES_LOCK:
-        cores = [core for core in _CORES if core.getPrimaryLogFile() == old]
-    for core in cores:
-        core.setPrimaryLogFile(new)
-    return cores
+def core_logfile(logfile: Path) -> Path:
+    """The CoreLog's file, next to `logfile`.
 
-
-class _CoreSharedFileHandler(RotatingFileHandler):
-    """A rotating log file that MMCore's CoreLog writes to as well.
-
-    MMCore holds the file open from C++: Windows cannot rename it then, and
-    elsewhere the core would go on writing to the renamed (in time deleted) file.
-    So the cores let it go while it rotates, then move to the new file.
+    MMCore writes it, and rotates it, itself: two handles appending to one file
+    can overwrite each other's lines on Windows.
     """
+    return logfile.with_name(f"{logfile.stem}-core{logfile.suffix}")
 
-    def doRollover(self) -> None:
-        cores = _move_cores(self.baseFilename, "")
-        try:
-            super().doRollover()
-        finally:
-            for core in cores:
-                core.setPrimaryLogFile(self.baseFilename)
+
+def _send_core_log(core: CMMCore) -> None:
+    file, max_bytes, backups = _core_log
+    # older MMCore cannot rotate its log: the file then just grows
+    if hasattr(core, "setPrimaryLogFileRotation"):
+        core.setPrimaryLogFileRotation(max_bytes, backups)  # applied on (re)opening
+    core.setPrimaryLogFile(file)
 
 
 _FILE_FORMATTER = logging.Formatter(
@@ -151,7 +144,6 @@ def configure_logging(
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
 
-    old_file = current_logfile(logger)
     for handler in list(logger.handlers):
         logger.removeHandler(handler)
         handler.close()
@@ -181,24 +173,33 @@ def configure_logging(
         log_file.parent.mkdir(parents=True, exist_ok=True)
 
         # Create a rotating file handler with a maximum file size and backup count.
-        file_handler = _CoreSharedFileHandler(
+        file_handler = RotatingFileHandler(
             log_file, maxBytes=file_rotation * 1_000_000, backupCount=file_retention
         )
         file_handler.setLevel(file_level)
         file_handler.setFormatter(_FILE_FORMATTER)
         logger.addHandler(file_handler)
 
-    # cores that logged to the previous file (or to none) move to this one
-    if (new_file := current_logfile(logger)) != old_file:
-        _move_cores(str(old_file or ""), str(new_file or ""))
+    # cores that logged to the previous core log file (or to none) move to this one
+    global _core_log
+    previous = _core_log[0]
+    if logfile := current_logfile(logger):
+        rotation = (file_rotation * 1_000_000, file_retention)
+        _core_log = (str(core_logfile(logfile)), *rotation)
+    else:
+        _core_log = ("", 0, 0)
+    with _CORES_LOCK:
+        cores = [core for core in _CORES if core.getPrimaryLogFile() == previous]
+    for core in cores:
+        _send_core_log(core)
 
 
 def log_core_to_file(core: CMMCore) -> None:
-    """Send `core`'s CoreLog to the log file, following it as it rotates or moves."""
+    """Send `core`'s CoreLog to its file, next to the log file, as it moves."""
     with _CORES_LOCK:
         _CORES.add(core)
-    if logfile := current_logfile(logger):
-        core.setPrimaryLogFile(str(logfile))
+    if _core_log[0]:
+        _send_core_log(core)
 
 
 def current_logfile(logger: logging.Logger) -> Path | None:

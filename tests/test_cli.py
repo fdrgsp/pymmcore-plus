@@ -281,6 +281,15 @@ def test_run_mda_channels() -> None:
     # SIGINT, results passed back via channel/queue
 
 
+def test_cli_logs_core(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    log = tmp_path / "test.log"
+    log.write_text("python line\n")
+    _logger.core_logfile(log).write_text("core line\n")
+    monkeypatch.setattr(_logger, "LOG_FILE", log)
+    assert runner.invoke(app, ["logs"]).output.strip() == "python line"
+    assert runner.invoke(app, ["logs", "--core"]).output.strip() == "core line"
+
+
 # background process to test `logs --tail`
 def _background_tail(q: Queue, runner: Any, logfile: Path) -> None:
     from os import getpid, kill
@@ -292,7 +301,7 @@ def _background_tail(q: Queue, runner: Any, logfile: Path) -> None:
     _logger.LOG_FILE = logfile
 
     Timer(0.2, lambda: kill(getpid(), SIGINT)).start()
-    result = runner.invoke(app, ["logs", "--tail"], input="ctrl-c")
+    result = runner.invoke(app, ["logs", "--core", "--tail"], input="ctrl-c")
     q.put(result.output)
 
 
@@ -313,14 +322,16 @@ def test_cli_logs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     # instantiate core
     core = CMMCorePlus()
-    assert core.getPrimaryLogFile() == str(TEST_LOG)
+    assert core.getPrimaryLogFile() == str(_logger.core_logfile(TEST_LOG))
     core.loadSystemConfiguration()
     # it may take a moment for the log file to be written
     time.sleep(0.2)
     # run mmcore logs
-    result = runner.invoke(app, ["logs", "-n", "60"])
+    result = runner.invoke(app, ["logs", "-n", "60", "--core"])
     assert result.exit_code == 0
     assert "IFO,Core" in result.output  # this will come from CMMCore
+    result = runner.invoke(app, ["logs", "-n", "60"])
+    assert "IFO,Core" not in result.output  # the CoreLog has its own file
 
     # this one line depends critically on proper monkeypatching, and I can't get
     # the monkeypatch to work without causing lots of leaked file handle problems.
